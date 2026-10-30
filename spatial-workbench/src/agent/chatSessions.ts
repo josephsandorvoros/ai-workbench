@@ -39,6 +39,17 @@ export interface SavedChatSession {
   messages: SavedChatMessage[];
 }
 
+export function filterDuplicateAgentSessions<T extends { id: string; source: string; workbench_chat_id?: string }>(
+  agentSessions: T[],
+  savedSessions: Pick<SavedChatSession, "id">[],
+): T[] {
+  const savedIds = new Set(savedSessions.map((session) => session.id));
+  return agentSessions.filter((session) =>
+    !savedIds.has(session.workbench_chat_id ?? "") &&
+    !savedIds.has(`agent-${session.source}-${session.id}`),
+  );
+}
+
 export const CHAT_SESSIONS_STORAGE_KEY = "homelabSpatialWorkbench.agentChatSessions.v1";
 export const CHAT_SESSIONS_CHANGED_EVENT = "homelabSpatialWorkbench.chatSessionsChanged";
 export const LOAD_CHAT_SESSION_EVENT = "homelabSpatialWorkbench.loadChatSession";

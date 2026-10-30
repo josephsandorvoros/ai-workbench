@@ -328,6 +328,18 @@ class DashboardState:
         self.workspace_ignored_dirs = {".git", "__pycache__", "node_modules", "dist", "target", ".venv", "venv"}
         self.workbench_state_path = HERMES_HOME / "spatial-workbench" / "state.json"
         self.workbench_state_lock = threading.Lock()
+        self.gateway_session_ids_path = HERMES_HOME / "spatial-workbench" / "gateway_session_ids.json"
+        try:
+            stored_gateway_sessions = json.loads(self.gateway_session_ids_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            stored_gateway_sessions = {}
+        if isinstance(stored_gateway_sessions, dict):
+            self.gateway_session_ids = {
+                str(chat_id): str(session_id)
+                for chat_id, session_id in stored_gateway_sessions.items()
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", str(chat_id))
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", str(session_id))
+            }
         with self.workbench_state_lock:
             stats_choice = self._read_settings().get("stats_source_choice")
         if stats_choice == "host":
@@ -606,6 +618,40 @@ class DashboardState:
                 return {"ok": True}
             except OSError as exc:
                 return {"ok": False, "message": f"Workbench state save failed: {exc}"}
+
+    def delete_workbench_chat_session(self, session_id):
+        session_id = str(session_id or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", session_id):
+            return {"ok": False, "message": "A valid chat ID is required"}
+        with self.workbench_state_lock:
+            try:
+                state = self._read_workbench_state_file()
+                sessions = state.get("chat_sessions")
+                if not isinstance(sessions, list):
+                    sessions = []
+                retained = [session for session in sessions if not isinstance(session, dict) or session.get("id") != session_id]
+                deleted = len(sessions) - len(retained)
+                state["chat_sessions"] = retained
+                self._write_workbench_state_file(state)
+            except OSError as exc:
+                return {"ok": False, "message": f"Saved chat delete failed: {exc}"}
+        with self.gateway_session_lock:
+            linked_agent_session_id = self.gateway_session_ids.get(session_id)
+        if not linked_agent_session_id:
+            return {"ok": True, "deleted": deleted, "agent_session_deleted": False}
+        agent_result = self.agent_session_delete("hermes", linked_agent_session_id)
+        if not agent_result.get("ok"):
+            return {
+                "ok": True,
+                "deleted": deleted,
+                "agent_session_deleted": False,
+                "warning": f"Saved chat deleted, but linked Hermes history remains: {agent_result.get('message', 'delete failed')}",
+            }
+        with self.gateway_session_lock:
+            if self.gateway_session_ids.get(session_id) == linked_agent_session_id:
+                self.gateway_session_ids.pop(session_id, None)
+                self._save_gateway_session_ids()
+        return {"ok": True, "deleted": deleted, "agent_session_deleted": True}
 
     @staticmethod
     def _board_element_key(element):
@@ -1495,6 +1541,16 @@ class DashboardState:
             self.gateway_session_ids[chat_id] = session_id
             while len(self.gateway_session_ids) > 256:
                 self.gateway_session_ids.pop(next(iter(self.gateway_session_ids)))
+            self._save_gateway_session_ids()
+
+    def _save_gateway_session_ids(self):
+        try:
+            self.gateway_session_ids_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.gateway_session_ids_path.with_suffix(".tmp")
+            temp_path.write_text(json.dumps(self.gateway_session_ids), encoding="utf-8")
+            temp_path.replace(self.gateway_session_ids_path)
+        except OSError as exc:
+            print(f"[agent-sessions] gateway session mapping save failed: {exc}", file=sys.stderr)
 
     def gateway_session_totals(self, session_id):
         """Token totals Hermes persisted for every turn of this chat; the command agent starts at zero."""
@@ -1682,6 +1738,8 @@ class DashboardState:
         roots = self._agent_roots()
         safe_limit = max(1, min(int(limit), 100))
         sessions = []
+        with self.gateway_session_lock:
+            workbench_chat_ids = {session_id: chat_id for chat_id, session_id in self.gateway_session_ids.items()}
 
         rows = self._read_sqlite(
             roots["hermes_state_db"],
@@ -1691,19 +1749,21 @@ class DashboardState:
         )
         if rows:
             for row in rows:
-                sessions.append(
-                    {
-                        "source": "hermes",
-                        "id": row[0],
-                        "title": row[1] or "(untitled)",
-                        "model": row[3],
-                        "message_count": row[4],
-                        "started_at": row[5],
-                        "last_activity_at": row[6],
-                        "cwd": row[7],
-                        "archived": bool(row[8]),
-                    }
-                )
+                session = {
+                    "source": "hermes",
+                    "id": row[0],
+                    "title": row[1] or "(untitled)",
+                    "model": row[3],
+                    "message_count": row[4],
+                    "started_at": row[5],
+                    "last_activity_at": row[6],
+                    "cwd": row[7],
+                    "archived": bool(row[8]),
+                }
+                workbench_chat_id = workbench_chat_ids.get(str(row[0]))
+                if workbench_chat_id:
+                    session["workbench_chat_id"] = workbench_chat_id
+                sessions.append(session)
 
         rows = self._read_sqlite(
             roots["opencode_db"],
@@ -4157,6 +4217,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             result = self.state.save_workbench_state(body)
             self._send_json(result, status=200 if result.get("ok") else 500)
+            return
+        if self.path == "/api/workbench/chat-session/delete":
+            try:
+                body = self._read_json_body()
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "message": "Invalid JSON body"}, status=400)
+                return
+            result = self.state.delete_workbench_chat_session(body.get("id") if isinstance(body, dict) else "")
+            self._send_json(result, status=200 if result.get("ok") else 400)
             return
         if self.path == "/api/board":
             try:

@@ -42,6 +42,7 @@ export interface AgentMemoryFile {
 export interface AgentSession {
   source: "hermes" | "opencode";
   id: string;
+  workbench_chat_id?: string;
   title: string;
   model: string | null;
   message_count: number | null;

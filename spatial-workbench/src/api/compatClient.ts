@@ -409,6 +409,10 @@ export const compatClient = {
     ),
   saveWorkbenchState: (state: { artifact: unknown; chat_sessions: unknown[] }) =>
     postJson<{ ok: boolean }>("/api/workbench/state", state),
+  deleteWorkbenchChatSession: (id: string) =>
+    postJson<{ ok: boolean; deleted: number; agent_session_deleted: boolean; warning?: string }>(
+      "/api/workbench/chat-session/delete", { id },
+    ),
   getBoard: () => getJson<BoardStateResponse>("/api/board"),
   saveBoard: (board: BoardState, baseRevision?: number, merge = false) =>
     postJson<{ ok: boolean; revision?: number }>("/api/board", {

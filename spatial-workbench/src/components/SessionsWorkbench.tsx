@@ -9,11 +9,13 @@ import {
   CHAT_SESSIONS_CHANGED_EVENT,
   LOAD_CHAT_SESSION_EVENT,
   deleteSavedChatSession,
+  filterDuplicateAgentSessions,
   loadSavedChatSessions,
   upsertSavedChatSession,
   type SavedChatMessage,
   type SavedChatSession,
 } from "../agent/chatSessions";
+import { compatClient } from "../api/compatClient";
 import { Markdown } from "./Markdown";
 
 type SessionsStatus = "available" | "degraded" | "error";
@@ -79,12 +81,22 @@ export function SessionsWorkbench() {
     setSelectedSaved(next.find((item) => item.id === savedDraft.id) ?? null);
   };
 
-  const deleteSaved = (id: string) => {
-    if (!window.confirm("Delete this saved chat?")) return;
-    setSavedSessions(deleteSavedChatSession(id));
-    if (selectedSaved?.id === id) {
-      setSelectedSaved(null);
-      setSavedDraft(null);
+  const deleteSaved = async (id: string) => {
+    if (!window.confirm("Delete this Workbench chat and its linked Hermes history, if any? This cannot be undone.")) return;
+    setBusy(true);
+    setMessage("Deleting saved chat…");
+    try {
+      const result = await compatClient.deleteWorkbenchChatSession(id);
+      setSavedSessions(deleteSavedChatSession(id));
+      if (selectedSaved?.id === id) {
+        setSelectedSaved(null);
+        setSavedDraft(null);
+      }
+      setMessage(result.warning || "Saved chat deleted.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -141,6 +153,7 @@ export function SessionsWorkbench() {
   const savedAgentCopy = selectedAgent
     ? savedSessions.find((item) => item.id === `agent-${selectedAgent.source}-${selectedAgent.id}`)
     : undefined;
+  const visibleAgentSessions = filterDuplicateAgentSessions(agentSessions, savedSessions);
 
   return (
     <section className="sessions-workbench" aria-label="Chat sessions workbench">
@@ -166,7 +179,7 @@ export function SessionsWorkbench() {
               </button>
             ))}
             <h3 className="context-section-title">Agent history</h3>
-            {agentSessions.length === 0 ? <p className="muted small">No recent Hermes/OpenCode sessions found.</p> : agentSessions.map((session) => (
+            {visibleAgentSessions.length === 0 ? <p className="muted small">No recent Hermes/OpenCode sessions found.</p> : visibleAgentSessions.map((session) => (
               <button key={`${session.source}-${session.id}`} type="button" className={`context-session-btn ${selectedAgent?.id === session.id && selectedAgent?.source === session.source ? "selected" : ""}`} onClick={() => void selectAgent(session)}>
                 <div className="context-list-title"><strong>{session.title}</strong><span className="context-source-tag">{session.source}</span></div>
                 <p className="muted small">{session.model ?? "unknown model"}{session.message_count != null ? ` · ${session.message_count} msgs` : ""}</p>

@@ -125,6 +125,52 @@ def contract_server(extra_env=None, legacy_backups=False):
 
 
 class ApiContractTests(unittest.TestCase):
+    def test_workbench_chat_delete_persists_and_preserves_artifact_state(self):
+        with contract_server() as server:
+            state = server.server.state
+            server.post_json("/api/workbench/state", {
+                "artifact": {"name": "current", "html": "<h1>kept</h1>", "updatedAt": 1},
+                "chat_sessions": [{"id": "chat-1"}, {"id": "chat-2"}],
+            })
+            hermes_db = state._agent_roots()["hermes_state_db"]
+            hermes_db.parent.mkdir(parents=True, exist_ok=True)
+            import sqlite3
+            with sqlite3.connect(hermes_db) as connection:
+                connection.executescript(
+                    "CREATE TABLE sessions (id TEXT PRIMARY KEY);"
+                    "CREATE TABLE messages (session_id TEXT);"
+                    "INSERT INTO sessions VALUES ('hermes-session-1');"
+                    "INSERT INTO messages VALUES ('hermes-session-1');"
+                )
+            state.remember_gateway_session_id("chat-1", "hermes-session-1")
+
+            _, result = server.post_json("/api/workbench/chat-session/delete", {"id": "chat-1"})
+            _, state = server.get_json("/api/workbench/state")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["deleted"], 1)
+            self.assertTrue(result["agent_session_deleted"])
+            self.assertEqual([session["id"] for session in state["chat_sessions"]], ["chat-2"])
+            self.assertEqual(state["artifact"]["html"], "<h1>kept</h1>")
+            with sqlite3.connect(hermes_db) as connection:
+                self.assertEqual(connection.execute("SELECT id FROM sessions").fetchall(), [])
+                self.assertEqual(connection.execute("SELECT session_id FROM messages").fetchall(), [])
+
+    def test_gateway_session_mapping_persists_and_marks_agent_history(self):
+        with contract_server() as server:
+            state = server.server.state
+            state.remember_gateway_session_id("chat-1", "hermes-session-1")
+            restarted = dashboard_server.DashboardState()
+            self.assertEqual(restarted.gateway_session_id_for("chat-1"), "hermes-session-1")
+
+            with patch.object(restarted, "_read_sqlite", side_effect=[
+                [("hermes-session-1", "A saved chat", "api", "model", 2, 1, 2, None, 0)],
+                None,
+            ]):
+                sessions = restarted.agent_sessions()["sessions"]
+
+            self.assertEqual(sessions[0]["workbench_chat_id"], "chat-1")
+
     def test_app_preview_start_requires_terminal_token_when_configured(self):
         with contract_server(extra_env={"TERMINAL_API_TOKEN": "preview-test-token"}) as server:
             project = server.workspace_root / "demo"
