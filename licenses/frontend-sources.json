@@ -1,0 +1,78 @@
+{
+  "excalidrawVersion": "0.18.1",
+  "allowedLicenses": ["MIT", "ISC", "BSD-3-Clause", "Apache-2.0", "Apache-2.0 OR MIT", "(MPL-2.0 OR Apache-2.0)", "CC-BY-4.0", "CC0-1.0", "(MIT AND Zlib)", "Unlicense", "0BSD"],
+  "packages": {
+    "@excalidraw/excalidraw@0.18.1": {"source": "excalidraw"},
+    "react-resizable-panels@3.0.6": {"source": "panels"},
+    "react-remove-scroll-bar@2.3.8": {"source": "scroll"},
+    "khroma@2.1.0": {"license": "MIT"}
+  },
+  "radixPackages": {
+    "@radix-ui/primitive": ["1.0.0", "1.1.1"],
+    "@radix-ui/react-tabs": ["1.0.2"],
+    "@radix-ui/react-context": ["1.0.0", "1.1.1"],
+    "@radix-ui/react-direction": ["1.0.0"],
+    "@radix-ui/react-id": ["1.0.0", "1.1.0"],
+    "@radix-ui/react-use-layout-effect": ["1.0.0", "1.1.0"],
+    "@radix-ui/react-presence": ["1.0.0", "1.1.2"],
+    "@radix-ui/react-compose-refs": ["1.0.0", "1.1.1"],
+    "@radix-ui/react-primitive": ["1.0.1", "2.0.2"],
+    "@radix-ui/react-slot": ["1.0.1", "1.1.2"],
+    "@radix-ui/react-roving-focus": ["1.0.2"],
+    "@radix-ui/react-collection": ["1.0.1"],
+    "@radix-ui/react-use-callback-ref": ["1.0.0", "1.1.0"],
+    "@radix-ui/react-use-controllable-state": ["1.0.0", "1.1.0"],
+    "@radix-ui/react-arrow": ["1.1.2"],
+    "@radix-ui/react-dismissable-layer": ["1.1.5"],
+    "@radix-ui/react-focus-guards": ["1.1.1"],
+    "@radix-ui/react-focus-scope": ["1.1.2"],
+    "@radix-ui/react-popover": ["1.1.6"],
+    "@radix-ui/react-popper": ["1.2.2"],
+    "@radix-ui/react-portal": ["1.1.4"],
+    "@radix-ui/react-use-escape-keydown": ["1.1.0"],
+    "@radix-ui/react-use-rect": ["1.1.0"],
+    "@radix-ui/react-use-size": ["1.1.0"],
+    "@radix-ui/rect": ["1.1.0"]
+  },
+  "fonts": {
+    "Assistant": null,
+    "Cascadia": null,
+    "ComicShanns": null,
+    "Excalifont": "excalifont",
+    "Liberation": null,
+    "Lilita": null,
+    "Nunito": null,
+    "Virgil": null,
+    "Xiaolai": "xiaolai"
+  },
+  "sources": {
+    "excalidraw": {
+      "url": "https://raw.githubusercontent.com/excalidraw/excalidraw/a2ec2889babf7d2295469c6d90ebe77fae57df84/LICENSE",
+      "sha256": "1352d204fdb90d5e482c13139d848bc2c9300a9a7de358a0a558a23e72d0d8be"
+    },
+    "radix": {
+      "url": "https://raw.githubusercontent.com/radix-ui/primitives/main/LICENSE",
+      "sha256": "0e80a2d229d2fd4fc7e8636142ec5d0ff0bc031f14c15b682e2ac01dfd5b5138"
+    },
+    "panels": {
+      "url": "https://raw.githubusercontent.com/bvaughn/react-resizable-panels/43a071df6bb96d54e8b81a6be0e2d453af45cc4b/LICENSE",
+      "sha256": "8b21167f99f3c016b39473b2984ceb03b54bf796dd9a7c74fcb80cfd513fe8a8"
+    },
+    "scroll": {
+      "url": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/master/LICENSE",
+      "sha256": "a79aae0c0f21990d9d963bb3c5a79cdcea9a46f8523ba55c58d7fe776b6ebc84"
+    },
+    "ofl": {
+      "url": "https://openfontlicense.org/documents/OFL.txt",
+      "sha256": "1d361a8f8e8ce6e68457dcd93fb56e162e6baa3bbb7e7573a290d44399f6b57e"
+    },
+    "excalifont": {
+      "url": "https://raw.githubusercontent.com/excalidraw/excalidraw/a2ec2889babf7d2295469c6d90ebe77fae57df84/packages/excalidraw/fonts/Excalifont/index.ts",
+      "sha256": "db994e57791014204ba89e7ff902f2409b46ace3cd53907c3b4ac0e88d8e18c9"
+    },
+    "xiaolai": {
+      "url": "https://raw.githubusercontent.com/excalidraw/excalidraw/a2ec2889babf7d2295469c6d90ebe77fae57df84/packages/excalidraw/fonts/Xiaolai/index.ts",
+      "sha256": "c2cbbbfa669404795527e06cf596ab4b1b851f9bb993c608c8ab9c3c2aabe9d3"
+    }
+  }
+}

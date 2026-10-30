@@ -1,0 +1,13 @@
+{
+  "status": "pending",
+  "reviewedAt": "2026-10-30",
+  "maintainerDecision": "Defer Liberation font replacement to a later update and continue the publishing setup without claiming complete license compliance.",
+  "blockers": [
+    "Establish exact legacy Liberation font licensing and source obligations, or approve a verified compatible replacement.",
+    "Inventory the exact agent, web, sandbox and worker image digests and their native/Python/OpenCode dependencies.",
+    "Provide matching corresponding sources or another valid mechanism for applicable GPL/LGPL components; preserve all required notices.",
+    "Verify third-party and original asset provenance, including the desktop icon and local promise-pool shim."
+  ],
+  "desktopDistribution": "not-reviewed",
+  "evidence": "THIRD_PARTY_NOTICES.md"
+}

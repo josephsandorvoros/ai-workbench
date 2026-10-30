@@ -1,0 +1,18 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# One cleanup pass of leftover sandbox workers at startup, then stay idle so s6 doesn't restart it.
+case "${JOBS_SANDBOX:-0}" in
+    1|true|TRUE|yes|YES|on|ON|docker) ;;
+    *) case "${AGENT_SANDBOX:-0}" in
+        1|true|TRUE|yes|YES|on|ON|docker) ;;
+        *) exec sleep infinity ;;
+    esac ;;
+esac
+
+export HOME=/opt/data
+if [ "$(id -u)" = 0 ]; then
+    s6-setuidgid hermes python3 /opt/workbench/sandbox_reaper.py
+else
+    python3 /opt/workbench/sandbox_reaper.py
+fi
+exec sleep infinity

@@ -1,0 +1,14 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# AI Workbench companion API (dashboard_server.py), supervised by s6
+# alongside the Hermes gateway so it shares HERMES_HOME, /proc and the CLIs.
+case "${WORKBENCH_API:-1}" in
+    0|false|FALSE|no|NO) exit 0 ;;
+esac
+
+export HOME=/opt/data
+cd /opt/data
+
+port="${WORKBENCH_API_PORT:-8080}"
+[ "$(id -u)" = 0 ] || exec python3 /opt/workbench/dashboard_server.py --host 0.0.0.0 --port "$port"
+exec s6-setuidgid hermes python3 /opt/workbench/dashboard_server.py --host 0.0.0.0 --port "$port"

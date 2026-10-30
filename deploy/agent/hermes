@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+if [ "$(id -u)" = 0 ]; then
+    exec /command/s6-setuidgid hermes python3 /opt/workbench/hermes_runtime.py exec "$@"
+fi
+exec python3 /opt/workbench/hermes_runtime.py exec "$@"

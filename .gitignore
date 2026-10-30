@@ -1,0 +1,11 @@
+node_modules/
+dist/
+__pycache__/
+.pytest_cache/
+spatial-workbench/src-tauri/target/
+spatial-workbench/src-tauri/gen/
+.env
+.env.*
+!.env.example
+/MAINTAINER_README.local.md
+/BLOG_POST_DRAFT.md

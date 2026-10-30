@@ -1,0 +1,44 @@
+# Build-only overlay, used by publish.sh / CI:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml build
+services:
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/agent/Dockerfile
+      labels:
+        org.opencontainers.image.source: https://github.com/josephsandorvoros/ai-workbench
+      args:
+        HERMES_IMAGE: ${HERMES_IMAGE:-nousresearch/hermes-agent:latest}
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-latest}
+        WORKBENCH_VERSION: ${WORKBENCH_TAG:-latest}
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/web/Dockerfile
+      labels:
+        org.opencontainers.image.source: https://github.com/josephsandorvoros/ai-workbench
+      args:
+        WORKBENCH_VERSION: ${WORKBENCH_TAG:-latest}
+
+  sandbox:
+    build:
+      context: ..
+      dockerfile: deploy/sandbox/Dockerfile
+      labels:
+        org.opencontainers.image.source: https://github.com/josephsandorvoros/ai-workbench
+      args:
+        WORKBENCH_VERSION: ${WORKBENCH_TAG:-latest}
+
+  # Not a running service: the job engine starts it on the sandbox daemon.
+  worker:
+    image: ${WORKBENCH_IMAGE_PREFIX:-ghcr.io/josephsandorvoros}/spatial-workbench-worker:${WORKBENCH_TAG:-latest}
+    profiles: [sandbox]
+    build:
+      context: ..
+      dockerfile: deploy/worker/Dockerfile
+      labels:
+        org.opencontainers.image.source: https://github.com/josephsandorvoros/ai-workbench
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-latest}
+        WORKBENCH_VERSION: ${WORKBENCH_TAG:-latest}

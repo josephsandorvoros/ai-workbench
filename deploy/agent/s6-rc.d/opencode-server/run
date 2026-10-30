@@ -1,0 +1,14 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Headless OpenCode server (container-local only). Clients attach with
+# `opencode run --attach http://127.0.0.1:${OPENCODE_SERVER_PORT}`.
+case "${OPENCODE_SERVER:-1}" in
+    0|false|FALSE|no|NO) exit 0 ;;
+esac
+
+export HOME=/opt/data
+cd "${WORKSPACE_ROOT:-/workspace}" 2>/dev/null || cd /opt/data
+
+port="${OPENCODE_SERVER_PORT:-4096}"
+[ "$(id -u)" = 0 ] || exec opencode serve --hostname 127.0.0.1 --port "$port"
+exec s6-setuidgid hermes opencode serve --hostname 127.0.0.1 --port "$port"

@@ -1,0 +1,124 @@
+# AI Workbench appliance — single-VM deployment (pulls published images).
+#
+#   cp .env.example .env    # set LLM_BASE_URL (+ LLM_MODEL), optionally auth
+#   docker compose --profile sandbox pull
+#   docker compose --profile sandbox up -d
+#
+# Works as-is in Portainer: paste this file and set the variables in the stack.
+# UI: http://<vm>:${WORKBENCH_PORT:-1420}
+name: spatial-workbench
+
+services:
+  agent:
+    image: ${WORKBENCH_IMAGE_PREFIX:-ghcr.io/josephsandorvoros}/spatial-workbench-agent:${WORKBENCH_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      HERMES_UID: ${HERMES_UID:-10000}
+      HERMES_GID: ${HERMES_GID:-10000}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      MODEL_CONTEXT_FALLBACK: ${MODEL_CONTEXT_FALLBACK:-32768}
+      # Resource monitor: this host by default; set GLANCES_URL to watch another machine.
+      GLANCES_URL: ${GLANCES_URL:-}
+      GLANCES_DISK_MOUNT: ${GLANCES_DISK_MOUNT:-/}
+      GLANCES_GPU_ID: ${GLANCES_GPU_ID:-}
+      # Optional speech services; tokens are provisioned separately in private settings.
+      SPEECH_STT_URL: ${SPEECH_STT_URL:-}
+      SPEECH_TTS_URL: ${SPEECH_TTS_URL:-}
+      # Main OpenCode model/provider, independent of Hermes and job workers.
+      OPENCODE_MODEL: ${OPENCODE_MODEL:-opencode/big-pickle}
+      OPENCODE_CUSTOM_BASE_URL: ${OPENCODE_CUSTOM_BASE_URL:-}
+      OPENCODE_CUSTOM_API_KEY: ${OPENCODE_CUSTOM_API_KEY:-}
+      OPENCODE_MAIN_API_KEY: ${OPENCODE_MAIN_API_KEY:-}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # Leave empty to auto-generate on first boot (persisted in the hermes-data volume).
+      API_SERVER_KEY: ${API_SERVER_KEY:-}
+      TERMINAL_API_TOKEN: ${TERMINAL_API_TOKEN:-}
+      # proxy = trust the reverse proxy's login (no token prompts); token = require TERMINAL_API_TOKEN.
+      WORKBENCH_AUTH: ${WORKBENCH_AUTH:-proxy}
+      API_SERVER_CORS_ORIGINS: ${API_SERVER_CORS_ORIGINS:-}
+      OPENWEBUI_URL: ${OPENWEBUI_URL:-}
+      # Set to 0 to disable version checks (GitHub, npm, and the image's source repo).
+      UPDATE_CHECK: ${UPDATE_CHECK:-1}
+      # Optional: route Hermes' own terminal commands through isolated workers.
+      AGENT_SANDBOX: ${AGENT_SANDBOX:-0}
+      JOBS_SANDBOX: ${JOBS_SANDBOX:-1}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-}
+      SANDBOX_CPU: ${SANDBOX_CPU:-}
+      SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-}
+      # Jobs board: Hermes plans, OpenCode workers (on the sandbox daemon) execute.
+      WORKER_IMAGE: ${WORKER_IMAGE:-${WORKBENCH_IMAGE_PREFIX:-ghcr.io/josephsandorvoros}/spatial-workbench-worker:${WORKBENCH_TAG:-latest}}
+      WORKER_MODEL: ${WORKER_MODEL:-opencode/big-pickle}
+      WORKER_BASE_URL: ${WORKER_BASE_URL:-}
+      WORKER_API_KEY: ${WORKER_API_KEY:-}
+      JOB_PLAN_APPROVAL: ${JOB_PLAN_APPROVAL:-1}
+      JOB_AUTO_APPROVE: ${JOB_AUTO_APPROVE:-0}
+      # Jobs use isolated OpenCode workers independently of Hermes' own terminal mode.
+      JOBS_DOCKER_HOST: ${JOBS_DOCKER_HOST:-tcp://sandbox:2376}
+      JOBS_DOCKER_TLS_VERIFY: "1"
+      JOBS_DOCKER_CERT_PATH: /certs/client
+      MAX_PARALLEL_JOBS: ${MAX_PARALLEL_JOBS:-2}
+      MAX_WORKERS_PER_JOB: ${MAX_WORKERS_PER_JOB:-3}
+      MAX_WORKERS_TOTAL: ${MAX_WORKERS_TOTAL:-4}
+      WORKER_CPU: ${WORKER_CPU:-1}
+      WORKER_MEMORY_MB: ${WORKER_MEMORY_MB:-1536}
+      JOB_TIMEOUT_MINUTES: ${JOB_TIMEOUT_MINUTES:-30}
+      # Tighter loop: after each wave, Hermes reviews results and may append a new wave.
+      JOB_TIGHTER_LOOP: ${JOB_TIGHTER_LOOP:-0}
+      JOB_MAX_WAVES: ${JOB_MAX_WAVES:-3}
+    volumes:
+      - hermes-data:/opt/data
+      - workspace:/workspace
+      - sandbox-certs:/certs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [workbench]
+
+  web:
+    image: ${WORKBENCH_IMAGE_PREFIX:-ghcr.io/josephsandorvoros}/spatial-workbench-web:${WORKBENCH_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      - agent
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # Optional: only these IPs/CIDRs may connect (e.g. your reverse proxy). Empty = anyone.
+      WORKBENCH_ALLOWED_CLIENTS: ${WORKBENCH_ALLOWED_CLIENTS:-}
+      WORKBENCH_AUTH_USER: ${WORKBENCH_AUTH_USER:-}
+      WORKBENCH_AUTH_PASSWORD_HASH: ${WORKBENCH_AUTH_PASSWORD_HASH:-}
+    ports:
+      - "${WORKBENCH_BIND:-127.0.0.1}:${WORKBENCH_PORT:-1420}:1420"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [workbench]
+
+  sandbox:
+    # Optional runtime service; the build overlay reuses this registry-qualified image name.
+    profiles: [sandbox]
+    image: ${WORKBENCH_IMAGE_PREFIX:-ghcr.io/josephsandorvoros}/spatial-workbench-sandbox:${WORKBENCH_TAG:-latest}
+    hostname: sandbox
+    privileged: true
+    restart: unless-stopped
+    environment:
+      SANDBOX_ALLOW_LAN: ${SANDBOX_ALLOW_LAN:-}
+      SANDBOX_PRUNE_HOURS: ${SANDBOX_PRUNE_HOURS:-24}
+    volumes:
+      - sandbox-certs:/certs
+      - sandbox-data:/var/lib/docker
+      - hermes-data:/opt/data
+      - workspace:/workspace
+    networks: [workbench]
+
+volumes:
+  hermes-data:
+  workspace:
+  sandbox-certs:
+  sandbox-data:
+
+networks:
+  workbench:

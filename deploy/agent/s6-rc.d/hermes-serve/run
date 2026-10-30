@@ -1,0 +1,14 @@
+#!/command/with-contenv sh
+# Private JSON-RPC/WebSocket endpoint consumed only by the companion API.
+case "${WORKBENCH_API:-1}" in
+	0|false|FALSE|no|NO) exit 125 ;;
+esac
+export HOME=/opt/data
+export HERMES_HOME=/opt/data
+cd /opt/data
+
+token="$(sed -n 's/^HERMES_DASHBOARD_SESSION_TOKEN=//p' /opt/data/workbench.env | head -n 1)"
+[ -n "$token" ] || exit 111
+export HERMES_DASHBOARD_SESSION_TOKEN="$token"
+
+exec s6-setuidgid hermes python3 /opt/workbench/hermes_runtime.py supervise serve

@@ -1,0 +1,4 @@
+# Optional Jobs worker daemon overlay. Include this file when JOBS_SANDBOX=1.
+services:
+  sandbox:
+    profiles: [sandbox]

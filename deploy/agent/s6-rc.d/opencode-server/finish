@@ -1,0 +1,7 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# 125 = permanent failure (don't restart) when the server is disabled.
+case "${OPENCODE_SERVER:-1}" in
+    0|false|FALSE|no|NO) exit 125 ;;
+esac
+exit 0

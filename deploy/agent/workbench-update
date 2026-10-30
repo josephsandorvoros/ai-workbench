@@ -1,0 +1,33 @@
+#!/bin/sh
+# Update components inside the running agent container.
+#   workbench-update opencode [version]   install into the persistent volume, restart the server
+#   workbench-update check                show available updates
+set -eu
+
+prefix="${NPM_CONFIG_PREFIX:-/opt/data/.local}"
+
+case "${1:-}" in
+    opencode)
+        version="${2:-latest}"
+        echo "Installing opencode-ai@${version} into ${prefix} ..."
+        npm install -g --prefix "$prefix" --allow-scripts=opencode-ai "opencode-ai@${version}" --no-fund --no-audit
+        echo "Installed: $("$prefix/bin/opencode" --version)"
+        if s6-svc -r /run/service/opencode-server 2>/dev/null; then
+            echo "Restarted the OpenCode server."
+        else
+            echo "Restart the container to restart the OpenCode server."
+        fi
+        ;;
+    hermes)
+        echo "Manage Hermes updates from Terminal -> Versions -> Hermes Agent."
+        echo "Use Check now, then confirm Update in the Hermes Agent row."
+        echo "This stages a persistent runtime, checks service health, and retains a rollback target."
+        ;;
+    check)
+        curl -fsS "http://127.0.0.1:${WORKBENCH_API_PORT:-8080}/api/updates?refresh=1" | python3 -m json.tool
+        ;;
+    *)
+        echo "usage: workbench-update {opencode [version]|hermes|check}" >&2
+        exit 2
+        ;;
+esac

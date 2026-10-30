@@ -1,0 +1,7 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# 125 = permanent failure (don't restart) when the API is disabled.
+case "${WORKBENCH_API:-1}" in
+    0|false|FALSE|no|NO) exit 125 ;;
+esac
+exit 0
