@@ -4,6 +4,12 @@
 
 A browser-based AI workbench: agent chat (Hermes / OpenCode / any OpenAI-compatible model), project files with Monaco and managed live app previews, a markdown wiki with `[[wikilinks]]`, an Excalidraw spatial board, HTML artifacts, a job board where Hermes plans work and isolated OpenCode workers execute it, and host resource monitoring.
 
+## Screenshots
+
+![AI Workbench overview](screenshots/workbench-overview.png)
+
+Full-screen captures of the live workspaces: [Projects](screenshots/projects-workspace.png), [Jobs Board](screenshots/jobs-board.png), [Spatial Board](screenshots/spatial-board.png), [Wiki](screenshots/wiki-workbench.png), [Agent Workbench](screenshots/agent-workbench.png), [Chat Sessions](screenshots/chat-sessions.png), [Free AI model tracker](screenshots/free-ai-model-tracker.png), and [Help](screenshots/help-window.png).
+
 ## Layout
 
 | Path | What |
