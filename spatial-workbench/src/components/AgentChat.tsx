@@ -37,9 +37,9 @@ import { buildAttachmentPrompt, prepareAttachment, type ChatAttachment } from ".
 import { loadRemoteWorkbenchState, saveRemoteWorkbenchField } from "../agent/workbenchRemote";
 import {
   CHAT_SESSIONS_CHANGED_EVENT,
-  CHAT_SESSIONS_STORAGE_KEY,
   LOAD_CHAT_SESSION_EVENT,
   loadSavedChatSessions,
+  persistSavedChatSessions,
   type ContextChip,
   type SavedChatMessage,
   type SavedChatSession,
@@ -934,7 +934,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
         setSavedSessions((current) => {
           const merged = [...remoteSessions, ...current.filter((item) => !remoteSessions.some((remote) => remote.id === item.id))]
             .sort((left, right) => right.updatedAt - left.updatedAt);
-          try { window.localStorage.setItem(CHAT_SESSIONS_STORAGE_KEY, JSON.stringify(merged)); } catch (_error) { /* local fallback */ }
+          persistSavedChatSessions(merged);
           return merged;
         });
       } else if (savedSessions.length > 0) {
@@ -991,7 +991,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
         const nextSessions = [nextSession, ...currentSessions.filter((session) => session.id !== activeSessionId)]
           .sort((left, right) => right.updatedAt - left.updatedAt)
           .slice(0, 50);
-        window.localStorage.setItem(CHAT_SESSIONS_STORAGE_KEY, JSON.stringify(nextSessions));
+        persistSavedChatSessions(nextSessions);
         if (remoteSessionsLoaded.current) void saveRemoteWorkbenchField("chat_sessions", nextSessions);
         return nextSessions;
       });

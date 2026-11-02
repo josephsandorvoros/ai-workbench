@@ -53,6 +53,44 @@ export function filterDuplicateAgentSessions<T extends { id: string; source: str
 export const CHAT_SESSIONS_STORAGE_KEY = "homelabSpatialWorkbench.agentChatSessions.v1";
 export const CHAT_SESSIONS_CHANGED_EVENT = "homelabSpatialWorkbench.chatSessionsChanged";
 export const LOAD_CHAT_SESSION_EVENT = "homelabSpatialWorkbench.loadChatSession";
+const MAX_SAVED_SESSIONS = 50;
+const MAX_SAVED_MESSAGES = 100;
+const MAX_SESSION_STORAGE_CHARS = 1_000_000;
+
+function limitText(value: string | undefined, maxLength: number): string | undefined {
+  if (value === undefined || value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)} [truncated]`;
+}
+
+function compactMessage(message: SavedChatMessage): SavedChatMessage {
+  return {
+    ...message,
+    content: limitText(message.content, 16_000) ?? "",
+    reasoning: limitText(message.reasoning, 4_000),
+    context: message.context?.slice(-12).map((chip) => ({
+      ...chip,
+      label: limitText(chip.label, 500) ?? "",
+      value: limitText(chip.value, 2_000),
+    })),
+    toolCalls: message.toolCalls?.slice(-12).map((toolCall) => ({
+      ...toolCall,
+      summary: limitText(toolCall.summary, 1_000) ?? "",
+      args: limitText(toolCall.args, 4_000) ?? "",
+      output: limitText(toolCall.output, 4_000),
+    })),
+  };
+}
+
+function shrinkOldest(sessions: SavedChatSession[]): boolean {
+  if (sessions.length > 1) {
+    sessions.pop();
+    return true;
+  }
+  const session = sessions[0];
+  if (!session || session.messages.length <= 1) return false;
+  session.messages = session.messages.slice(-Math.max(1, Math.ceil(session.messages.length / 2)));
+  return true;
+}
 
 export function loadSavedChatSessions(): SavedChatSession[] {
   try {
@@ -65,10 +103,31 @@ export function loadSavedChatSessions(): SavedChatSession[] {
   }
 }
 
-function persistSavedChatSessions(sessions: SavedChatSession[]) {
+export function persistSavedChatSessions(sessions: SavedChatSession[]) {
+  const compacted = [...sessions]
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .slice(0, MAX_SAVED_SESSIONS)
+    .map((session) => ({
+      ...session,
+      messages: session.messages.slice(-MAX_SAVED_MESSAGES).map(compactMessage),
+    }));
+
+  let serialized = JSON.stringify(compacted);
+  while (serialized.length > MAX_SESSION_STORAGE_CHARS && shrinkOldest(compacted)) {
+    serialized = JSON.stringify(compacted);
+  }
+
   try {
-    window.localStorage.setItem(CHAT_SESSIONS_STORAGE_KEY, JSON.stringify(sessions));
-    window.dispatchEvent(new Event(CHAT_SESSIONS_CHANGED_EVENT));
+    while (true) {
+      try {
+        window.localStorage.setItem(CHAT_SESSIONS_STORAGE_KEY, serialized);
+        window.dispatchEvent(new Event(CHAT_SESSIONS_CHANGED_EVENT));
+        return;
+      } catch (_error) {
+        if (!shrinkOldest(compacted)) return;
+        serialized = JSON.stringify(compacted);
+      }
+    }
   } catch (_error) {
     /* ignore quota / privacy-mode errors */
   }
@@ -79,7 +138,7 @@ export function upsertSavedChatSession(session: SavedChatSession): SavedChatSess
   const current = loadSavedChatSessions();
   const next = [session, ...current.filter((item) => item.id !== session.id)]
     .sort((left, right) => right.updatedAt - left.updatedAt)
-    .slice(0, 50);
+    .slice(0, MAX_SAVED_SESSIONS);
   persistSavedChatSessions(next);
   return next;
 }
