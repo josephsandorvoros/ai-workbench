@@ -80,6 +80,7 @@ class RuntimeManager:
             HERMES_AGENT_DIR=str(binaries.parent.parent),
             HERMES_PYTHON=str(python),
             HERMES_INSTALL_DIR=str(binaries.parent.parent),
+            HERMES_INSTALL_ROOT=str(binaries.parent.parent),
             VIRTUAL_ENV=str(binaries.parent.parent),
             HERMES_HOME=str(self.home),
         )
@@ -159,12 +160,19 @@ class RuntimeManager:
                 raise ValueError("This release has no dependency lock; it cannot be installed safely")
             image_python = self.env.get("HERMES_IMAGE_PYTHON", "/opt/hermes/.venv/bin/python")
             self._run(["uv", "sync", "--frozen", "--no-dev", "--extra", "all", "--python", image_python], cwd=target, timeout=1800)
-            self.progress("running", "Checking the staged Hermes runtime")
-            self._run([str(target / ".venv/bin/python"), "-c", "import hermes_cli.main; import gateway.run"], cwd=target)
-            self._run([str(target / ".venv/bin/hermes"), "--version"], cwd=target)
             commit = (target / ".git/HEAD").read_text().strip()
             if not re.fullmatch(r"[a-f0-9]{40,64}", commit):
                 raise ValueError("The staged release did not resolve to a pinned commit")
+            stamp_writer = target / "scripts/write_install_stamp.py"
+            if stamp_writer.is_file():
+                self._run([str(target / ".venv/bin/python"), str(stamp_writer),
+                           "--output", str(target / "install-stamp.json"),
+                           "--commit", commit, "--base-version", tag.removeprefix("v"),
+                           "--distance", "0", "--distribution", "docker",
+                           "--update-mechanism", "external"], cwd=target)
+            self.progress("running", "Checking the staged Hermes runtime")
+            self._run([str(target / ".venv/bin/python"), "-c", "import hermes_cli.main; import gateway.run"], cwd=target)
+            self._run([str(target / ".venv/bin/hermes"), "--version"], cwd=target)
             atomic_json(target / "workbench-release.json", {"tag": tag, "commit": commit, "installed_at": time.time()})
             return release_name
         except BaseException:
@@ -177,10 +185,16 @@ class RuntimeManager:
         return selection
 
     def healthy(self, generation):
+        services = {}
         for role in ("gateway", "serve"):
             service = read_json(self.root / f"{role}.json", {})
             if service.get("generation") != generation or service.get("state") != "running" or time.time() - service.get("updated_at", 0) > 10:
                 return False
+            services[role] = service
+        gateway = read_json(self.home / "gateway_state.json", {})
+        if (gateway.get("gateway_state") != "running" or not services["gateway"].get("pid")
+                or gateway.get("pid") != services["gateway"]["pid"]):
+            return False
         try:
             port = int(self.env.get("API_SERVER_PORT", "8642"))
             with urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
@@ -338,7 +352,7 @@ def supervise(role):
         selected = manager.selection()
         runtime = manager.runtime_path(selected["current"])
         environment = dict(os.environ, HERMES_AGENT_DIR=str(runtime), HERMES_PYTHON=str(runtime / ".venv/bin/python"),
-                   HERMES_INSTALL_DIR=str(runtime), VIRTUAL_ENV=str(runtime / ".venv"),
+                   HERMES_INSTALL_DIR=str(runtime), HERMES_INSTALL_ROOT=str(runtime), VIRTUAL_ENV=str(runtime / ".venv"),
                    HERMES_GATEWAY_NO_SUPERVISE="1")
         environment["PATH"] = str(runtime / ".venv/bin") + os.pathsep + environment.get("PATH", "")
         command = [str(runtime / ".venv/bin/hermes")]
@@ -370,7 +384,7 @@ def exec_cli(arguments):
     manager.recover_interrupted_activation()
     runtime = manager.runtime_path()
     environment = dict(os.environ, HERMES_AGENT_DIR=str(runtime), HERMES_PYTHON=str(runtime / ".venv/bin/python"),
-                       HERMES_INSTALL_DIR=str(runtime), VIRTUAL_ENV=str(runtime / ".venv"))
+                       HERMES_INSTALL_DIR=str(runtime), HERMES_INSTALL_ROOT=str(runtime), VIRTUAL_ENV=str(runtime / ".venv"))
     environment["PATH"] = str(runtime / ".venv/bin") + os.pathsep + environment.get("PATH", "")
     binary = str(runtime / ".venv/bin/hermes")
     os.execve(binary, [binary, *arguments], environment)

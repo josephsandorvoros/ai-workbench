@@ -1,5 +1,6 @@
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -108,17 +109,35 @@ class HermesRuntimeTests(unittest.TestCase):
                     (target / ".git").mkdir(parents=True)
                     (target / ".git/HEAD").write_text("a" * 40)
                     (target / "uv.lock").touch()
+                    (target / "scripts").mkdir()
+                    (target / "scripts/write_install_stamp.py").touch()
 
             with patch.object(manager, "_run", side_effect=run):
                 release = manager.prepare("v1.2.3")
             self.assertTrue((manager.root / "releases" / release / "workbench-release.json").is_file())
             self.assertEqual(manager.selection()["current"], "image")
             self.assertIn("import hermes_cli.main; import gateway.run", commands[-2])
+            stamp_command = commands[-3]
+            self.assertEqual(stamp_command[1], str(manager.runtime_path(release) / "scripts/write_install_stamp.py"))
+            self.assertEqual(stamp_command[stamp_command.index("--base-version") + 1], "1.2.3")
+            self.assertEqual(stamp_command[stamp_command.index("--commit") + 1], "a" * 40)
+            self.assertEqual(stamp_command[stamp_command.index("--update-mechanism") + 1], "external")
 
     def test_health_requires_both_selected_service_generations(self):
         with tempfile.TemporaryDirectory() as home:
             manager = self.manager(home)
             atomic_json(manager.root / "gateway.json", {"generation": "old", "state": "running"})
+            with patch("hermes_runtime.urlopen") as http:
+                self.assertFalse(manager.healthy("new"))
+            http.assert_not_called()
+
+    def test_health_rejects_an_old_gateway_despite_new_service_generations(self):
+        with tempfile.TemporaryDirectory() as home:
+            manager = self.manager(home)
+            for role, pid in (("gateway", 200), ("serve", 201)):
+                atomic_json(manager.root / f"{role}.json", {"generation": "new", "state": "running",
+                            "pid": pid, "updated_at": time.time()})
+            atomic_json(Path(home) / "gateway_state.json", {"gateway_state": "running", "pid": 477})
             with patch("hermes_runtime.urlopen") as http:
                 self.assertFalse(manager.healthy("new"))
             http.assert_not_called()
@@ -245,19 +264,36 @@ class HermesRuntimeTests(unittest.TestCase):
             self.assertEqual(selection["current"], "image")
             self.assertIsNone(selection["previous"])
 
+    def test_runtime_probe_uses_selected_install_root(self):
+        with tempfile.TemporaryDirectory() as home:
+            manager = RuntimeManager(home, {"HERMES_INSTALL_ROOT": "/old-image"})
+            release = "release-" + "a" * 32
+            binaries = manager.runtime_path(release) / ".venv/bin"
+            binaries.mkdir(parents=True)
+            for name in ("python", "hermes"):
+                executable = binaries / name
+                executable.touch()
+                executable.chmod(0o755)
+            with patch("hermes_runtime.subprocess.run") as run:
+                self.assertTrue(manager.runtime_available(release))
+            self.assertEqual(run.call_count, 2)
+            for call in run.call_args_list:
+                self.assertEqual(call.kwargs["env"]["HERMES_INSTALL_ROOT"], str(manager.runtime_path(release)))
+
     def test_early_cli_recovers_missing_release_before_exec(self):
         with tempfile.TemporaryDirectory() as home:
             manager = self.manager(home)
             manager._select("release-" + "a" * 32, None)
             calls = []
 
-            with patch.dict("os.environ", {"HERMES_HOME": home, "HERMES_IMAGE_DIR": "/opt/hermes"}), \
+            with patch.dict("os.environ", {"HERMES_HOME": home, "HERMES_IMAGE_DIR": "/opt/hermes", "HERMES_INSTALL_ROOT": "/old-image"}), \
                     patch("hermes_runtime.os.execve", side_effect=lambda *args: calls.append(args)):
                 from hermes_runtime import exec_cli
                 exec_cli(["config", "set", "mcp_servers.workbench", "{}"])
 
             self.assertEqual(manager.selection()["current"], "image")
             self.assertEqual(calls[0][0], "/opt/hermes/.venv/bin/hermes")
+            self.assertEqual(calls[0][2]["HERMES_INSTALL_ROOT"], "/opt/hermes")
 
     def test_supervisor_runs_foreground_gateway_without_s6_handoff(self):
         with tempfile.TemporaryDirectory() as home:
@@ -268,10 +304,11 @@ class HermesRuntimeTests(unittest.TestCase):
             def launch(command, **kwargs):
                 self.assertEqual(command[-2:], ["gateway", "run"])
                 self.assertEqual(kwargs["env"]["HERMES_GATEWAY_NO_SUPERVISE"], "1")
+                self.assertEqual(kwargs["env"]["HERMES_INSTALL_ROOT"], str(RuntimeManager(home).runtime_path()))
                 self.assertTrue(kwargs["start_new_session"])
                 handlers[__import__("signal").SIGTERM](None, None)
                 return child
 
-            with patch.dict("os.environ", {"HERMES_HOME": home}), patch("hermes_runtime.signal.signal", side_effect=lambda signum, handler: handlers.update({signum: handler})), patch("hermes_runtime.subprocess.Popen", side_effect=launch), patch("hermes_runtime.os.killpg"):
+            with patch.dict("os.environ", {"HERMES_HOME": home, "HERMES_INSTALL_ROOT": "/old-image"}), patch("hermes_runtime.signal.signal", side_effect=lambda signum, handler: handlers.update({signum: handler})), patch("hermes_runtime.subprocess.Popen", side_effect=launch), patch("hermes_runtime.os.killpg"):
                 supervise("gateway")
             child.wait.assert_called()

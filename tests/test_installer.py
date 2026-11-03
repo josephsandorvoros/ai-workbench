@@ -16,6 +16,11 @@ import bootstrap
 
 
 class InstallerTests(unittest.TestCase):
+    def test_agent_image_has_one_managed_gateway_owner(self):
+        dockerfile = (SCRIPT.parent / "agent" / "Dockerfile").read_text()
+        self.assertIn("RUN rm -f /etc/cont-init.d/02-reconcile-profiles", dockerfile)
+        self.assertIn('CMD ["python3", "/opt/workbench/hermes_runtime.py", "supervise", "gateway"]', dockerfile)
+
     def test_managed_hermes_cli_path_is_preferred_and_profile_edit_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory) / ".profile"
