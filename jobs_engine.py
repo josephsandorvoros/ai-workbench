@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from herdr_runtime import HerdrRuntime
 
 STAGES = ("inbox", "review", "needs_input", "planned", "running", "replanning", "collating", "done", "failed", "stopped")
 ACTIVE_STAGES = ("review", "running", "replanning", "collating")
@@ -39,7 +40,7 @@ MOVE_TARGETS = {
     "stopped": ("inbox",),
 }
 
-REVIEW_PROMPT = """You are the planner for a job board. Workers are isolated containers running the OpenCode
+REVIEW_PROMPT = """You are the planner for a job board. Workers run the OpenCode
 coding agent with internet access but no LAN access; each works in its own folder under a shared
 job directory and cannot see the others while running.
 
@@ -75,13 +76,16 @@ Job description:
 
 SUMMARY_PROMPT = """You are collating the results of a job that was split across parallel workers.
 Write the final report for the user in Markdown: what was done, key results, deliverables
-(paths are relative to /workspace/jobs/{job_id}/), and any failures or follow-ups.
+(paths are relative to {job_root}/), and any failures or follow-ups.
 Do not use any tools; answer from the information below.
 
 Job: {title}
 {description}
 
 Plan: {plan_summary}
+
+Available artifacts, relative to the job root (use these paths exactly):
+{artifacts}
 
 Worker results:
 {results}"""
@@ -295,12 +299,13 @@ class HermesClient:
 
 
 class JobEngine:
-    def __init__(self, db_path, workspace_root, hermes, docker=None, settings=None, skills_root=None, worker_config=None):
+    def __init__(self, db_path, workspace_root, hermes, docker=None, settings=None, skills_root=None, worker_config=None, herdr=None):
         self.db_path = Path(db_path)
         self.workspace_root = Path(workspace_root)
         self.skills_root = Path(skills_root or Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))) / "skills")
         self.hermes = hermes
         self.docker = docker or Docker()
+        self.herdr = herdr or HerdrRuntime(self.db_path.parent / "herdr")
         self.settings = settings or self.settings_from_env()
         self.worker_config = worker_config
         self.lock = threading.RLock()
@@ -343,6 +348,10 @@ class JobEngine:
                 db.execute("ALTER TABLE jobs ADD COLUMN attachments TEXT")
             if "skills" not in {column[1] for column in db.execute("PRAGMA table_info(jobs)")}:
                 db.execute("ALTER TABLE jobs ADD COLUMN skills TEXT")
+            if "execution_runtime" not in {column[1] for column in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN execution_runtime TEXT NOT NULL DEFAULT 'docker'")
+            if "runtime_state" not in {column[1] for column in db.execute("PRAGMA table_info(subtasks)")}:
+                db.execute("ALTER TABLE subtasks ADD COLUMN runtime_state TEXT")
             profile_columns = {column[1] for column in db.execute("PRAGMA table_info(worker_profiles)")}
             for column in ("base_url", "api_key_env"):
                 if column not in profile_columns:
@@ -363,9 +372,12 @@ class JobEngine:
             attempt_columns = {row[1] for row in db.execute("PRAGMA table_info(worker_attempts)")}
             for column, definition in (("project_branch", "TEXT"), ("project_worktree", "TEXT"),
                                        ("project_merged_at", "REAL"), ("input_tokens", "INTEGER DEFAULT 0"),
-                                       ("output_tokens", "INTEGER DEFAULT 0"), ("cost", "REAL DEFAULT 0")):
+                                       ("output_tokens", "INTEGER DEFAULT 0"), ("cost", "REAL DEFAULT 0"),
+                                       ("usage_available", "INTEGER NOT NULL DEFAULT 1")):
                 if column not in attempt_columns:
                     db.execute(f"ALTER TABLE worker_attempts ADD COLUMN {column} {definition}")
+            db.execute("UPDATE worker_attempts SET usage_available=0, input_tokens=NULL, output_tokens=NULL, cost=NULL "
+                       "WHERE job_id IN (SELECT id FROM jobs WHERE execution_runtime='herdr') AND usage_available=1")
 
     @staticmethod
     def settings_from_env():
@@ -385,6 +397,7 @@ class JobEngine:
             "tighter_loop": _truthy("JOB_TIGHTER_LOOP", "0"),
             "max_waves": _env_int("JOB_MAX_WAVES", 3),
             "sandbox": _truthy("JOBS_SANDBOX", "0"),
+            "execution_runtime": os.environ.get("JOB_WORKER_RUNTIME", "docker").strip(),
             "worker_uid": os.environ.get("WORKER_UID", str(os.getuid())),
         }
 
@@ -521,6 +534,8 @@ class JobEngine:
         if self.worker_config:
             connection = self.worker_config()
             settings.update(worker_model=connection["model"], worker_base_url=connection["base_url"])
+        settings["execution_runtime"] = self.settings.get("execution_runtime", "docker")
+        settings["runtime_available"] = {"docker": self.settings["sandbox"], "herdr": self.herdr.ready()}
         return settings
 
     @staticmethod
@@ -695,16 +710,21 @@ class JobEngine:
     # ------------------------------------------------------------------ user actions
 
     def create(self, title, description, attachments=None, skills=None, profile_id=None, project_path=None, base_branch="",
-               token_budget=None, cost_budget=None):
+               token_budget=None, cost_budget=None, execution_runtime=None):
         title = (title or "").strip()[:200]
         if not title:
             raise ValueError("A job needs a title")
+        execution_runtime = execution_runtime or self.settings.get("execution_runtime", "docker")
+        if execution_runtime not in {"docker", "herdr"}:
+            raise ValueError("Worker runtime must be docker or herdr")
         project_path, base_branch = self._validate_project(project_path, base_branch)
         try:
             token_budget = max(1, int(token_budget)) if token_budget not in (None, "") else None
             cost_budget = max(0.01, float(cost_budget)) if cost_budget not in (None, "") else None
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("Job budgets must be positive numbers") from exc
+        if execution_runtime == "herdr" and (token_budget is not None or cost_budget is not None):
+            raise ValueError("Herdr pilot does not yet provide verified token or cost accounting; omit budgets")
         profile = self.get_profile(profile_id) if profile_id else None
         if profile_id and not profile:
             raise ValueError("Worker profile not found")
@@ -767,11 +787,11 @@ class JobEngine:
             if profile_snapshot:
                 self._stage_profile_skills(job_id, profile_snapshot)
             db.execute(
-                "INSERT INTO jobs (id, title, description, stage, detail, created_at, updated_at, attachments, skills, profile_id, profile_snapshot, project_path, base_branch, token_budget, cost_budget) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO jobs (id, title, description, stage, detail, created_at, updated_at, attachments, skills, profile_id, profile_snapshot, project_path, base_branch, token_budget, cost_budget, execution_runtime) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, title, (description or "").strip()[:20000], "inbox", "Waiting for Hermes", _now(), _now(),
                  json.dumps(names), json.dumps(staged_skills), profile["id"] if profile else None,
-                 json.dumps(profile_snapshot) if profile_snapshot else None, project_path, base_branch, token_budget, cost_budget),
+                 json.dumps(profile_snapshot) if profile_snapshot else None, project_path, base_branch, token_budget, cost_budget, execution_runtime),
             )
             self._event(db, job_id, "stage", "inbox: created")
         return self.get_job(job_id)
@@ -968,16 +988,38 @@ class JobEngine:
         return self.get_job(job_id)
 
     def _stop_workers(self, db, job_id):
+        job = db.execute("SELECT execution_runtime FROM jobs WHERE id=?", (job_id,)).fetchone()
+        runtime = self.herdr if job and job["execution_runtime"] == "herdr" else self.docker
         for sub in db.execute("SELECT idx, container FROM subtasks WHERE job_id=? AND status IN ('queued','running','waiting_input')", (job_id,)):
             if sub["container"]:
-                self.docker.remove(sub["container"])
+                if job["execution_runtime"] == "herdr":
+                    attempt = db.execute("SELECT MAX(attempt) AS attempt FROM worker_attempts WHERE job_id=? AND idx=?",
+                                         (job_id, sub["idx"])).fetchone()["attempt"]
+                    log_file = self.job_dir(job_id) / ".logs" / f"subtask-{sub['idx'] + 1}-attempt-{attempt}.jsonl"
+                    log_file.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        screen = runtime.logs(sub["container"])
+                    except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                        screen = f"Worker screen unavailable: {exc}"
+                    log_file.write_text(screen, encoding="utf-8")
+                    db.execute("UPDATE worker_attempts SET status='stopped', finished_at=?, log_path=? "
+                               "WHERE job_id=? AND idx=? AND container=? AND status IN ('running','waiting_input')",
+                               (_now(), str(log_file), job_id, sub["idx"], sub["container"]))
+                runtime.remove(sub["container"])
             db.execute("UPDATE subtasks SET status='stopped', finished_at=? WHERE job_id=? AND idx=?", (_now(), job_id, sub["idx"]))
+
+    def _close_herdr_workers(self, db, job_id):
+        job = db.execute("SELECT execution_runtime FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if job and job["execution_runtime"] == "herdr":
+            for row in db.execute("SELECT DISTINCT container FROM worker_attempts WHERE job_id=? AND container IS NOT NULL", (job_id,)):
+                self.herdr.remove(row["container"])
 
     def archive(self, job_id):
         with self.lock, self._db() as db:
             job = db.execute("SELECT stage FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not job or job["stage"] in ACTIVE_STAGES:
                 raise ValueError("Stop the job before archiving it")
+            self._close_herdr_workers(db, job_id)
             self._set(db, job_id, archived=1)
             self._event(db, job_id, "archive", "archived")
 
@@ -990,6 +1032,7 @@ class JobEngine:
             if job["stage"] in ACTIVE_STAGES:
                 raise ValueError("Stop the job before deleting it")
             self._remove_project_worktrees(db, job_id)
+            self._close_herdr_workers(db, job_id)
             self._stop_workers(db, job_id)
             db.execute("DELETE FROM worker_attempts WHERE job_id=?", (job_id,))
             db.execute("DELETE FROM events WHERE job_id=?", (job_id,))
@@ -1027,6 +1070,7 @@ class JobEngine:
     def subtask_log(self, job_id, idx, tail=400):
         with self._db() as db:
             sub = db.execute("SELECT container, status FROM subtasks WHERE job_id=? AND idx=?", (job_id, idx)).fetchone()
+            job = db.execute("SELECT execution_runtime FROM jobs WHERE id=?", (job_id,)).fetchone()
         if not sub:
             return None
         with self._db() as db:
@@ -1036,7 +1080,24 @@ class JobEngine:
         if sub["status"] in ("done", "failed", "stopped", "timeout") and log_file.exists():
             lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
             return "\n".join(lines)
-        return self.docker.logs(sub["container"], tail=tail) if sub["container"] else ""
+        runtime = self.herdr if job["execution_runtime"] == "herdr" else self.docker
+        return runtime.logs(sub["container"], tail=tail) if sub["container"] else ""
+
+    def message_worker(self, job_id, idx, text, key=False):
+        with self.lock, self._db() as db:
+            sub = db.execute("SELECT s.container, s.status, j.execution_runtime, j.stage FROM subtasks s "
+                             "JOIN jobs j ON j.id=s.job_id WHERE s.job_id=? AND s.idx=?", (job_id, idx)).fetchone()
+            if not sub or sub["execution_runtime"] != "herdr" or sub["stage"] != "running" or sub["status"] not in {"running", "waiting_input"}:
+                raise ValueError("This worker does not have an active Herdr session")
+            try:
+                self.herdr.message(sub["container"], text, key=key)
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                raise ValueError(str(exc)) from exc
+            db.execute("UPDATE subtasks SET status='running', runtime_state=NULL, error=NULL WHERE job_id=? AND idx=?", (job_id, idx))
+            db.execute("UPDATE worker_attempts SET status='running' WHERE job_id=? AND idx=? AND container=?",
+                       (job_id, idx, sub["container"]))
+            self._event(db, job_id, "comms", f"subtask {idx + 1} received {'a key' if key else 'a message'} in its existing session")
+        return self.get_job(job_id)
 
     def job_comms(self, job_id):
         """Clarification threads (worker questions + coordinator answers) per subtask."""
@@ -1262,6 +1323,8 @@ class JobEngine:
                 max_subtasks=self.settings["max_workers_per_job"], title=job["title"],
                 description=job["description"] or "(none)", answers=answers,
             )
+            if job.get("execution_runtime") == "herdr":
+                prompt += "\nWorkers use persistent Herdr sessions and can pause for conversational replies without restarting."
             reply = extract_json(self.hermes(prompt))
             clear = bool(reply.get("clear", True))
             questions = [str(q) for q in (reply.get("questions") or []) if str(q).strip()][:5]
@@ -1293,6 +1356,8 @@ class JobEngine:
             results.append(f"### {sub['idx'] + 1}. {sub['title']} [{sub['status']}]\n{body[:6000]}")
         prompt = SUMMARY_PROMPT.format(
             job_id=job["id"], title=job["title"], description=job["description"] or "",
+            job_root=str(self.job_dir(job["id"]).resolve()),
+            artifacts="\n".join(item["path"] for item in self.job_files(job["id"])[:100]) or "(none)",
             plan_summary=(job.get("plan") or {}).get("summary", ""), results="\n\n".join(results),
         )
         ok = any(s["status"] == "done" for s in job["subtasks"])
@@ -1410,7 +1475,7 @@ class JobEngine:
             except OSError:
                 pass
 
-    def _worker_args(self, job_id, sub, skills=None, upstream=None, profile=None, project_worktree=None):
+    def _worker_args(self, job_id, sub, skills=None, upstream=None, profile=None, project_worktree=None, execution_runtime="docker"):
         s = self.settings
         permission = {"edit": "allow", "webfetch": "allow", "bash": "allow"}
         auto_approve = s["auto_approve"] and profile.get("permission_preset") == "trusted" if profile else s["auto_approve"]
@@ -1420,6 +1485,9 @@ class JobEngine:
                 "curl * | bash*": "deny", "wget * | sh*": "deny", "sudo *": "deny", "dd *": "deny", "mkfs*": "deny",
             }
         workdir = f"/workspace/jobs/{job_id}/subtask-{sub['idx'] + 1}"
+        if execution_runtime == "herdr":
+            workdir = str((self.job_dir(job_id) / f"subtask-{sub['idx'] + 1}").resolve())
+            permission["external_directory"] = {"*": "deny", str(self.job_dir(job_id).resolve() / "*"): "allow"}
         config = {"permission": permission}
         connection = self.worker_config() if self.worker_config else {
             "model": s["worker_model"], "base_url": s.get("worker_base_url", ""),
@@ -1463,11 +1531,11 @@ class JobEngine:
             if key_env and api_key:
                 worker_env = ["-e", f"{key_env}={api_key}"]
         if skills:
-            config["skills"] = {"paths": [f"/workspace/jobs/{job_id}/skills"]}
+            config["skills"] = {"paths": [str(self.job_dir(job_id).resolve() / "skills") if execution_runtime == "herdr" else f"/workspace/jobs/{job_id}/skills"]}
         # Inside the worker's workdir so OpenCode's write tool (scoped to the
         # workdir) can create question.json; a sibling dir is auto-rejected as
         # external_directory.
-        comms_dir = f"/workspace/jobs/{job_id}/subtask-{sub['idx'] + 1}/comms"
+        comms_dir = workdir + "/comms"
         prompt = sub["instructions"]
         if profile and profile.get("instructions"):
             prompt = f"{profile['instructions']}\n\nTask instructions:\n{prompt}"
@@ -1487,7 +1555,8 @@ class JobEngine:
                 " Do NOT read other subtask directories (e.g. ../subtask-N/): they are outside your"
                 " workdir and reads there are auto-rejected."
             )
-        prompt += (
+        if execution_runtime == "docker":
+            prompt += (
             "\nPut user-facing deliverables in artifacts/ under this working directory; keep intermediate files outside it."
             "\n\nClarifications: you run as a one-shot process and cannot wait for a reply. When you start, first"
             f" check {comms_dir}/answer.json: if it exists, read it, follow the answer, and finish the work."
@@ -1495,7 +1564,7 @@ class JobEngine:
             f" JSON file to {comms_dir}/question.json with exactly"
             ' {"id": "<short-slug>", "question": "<one clear question>"} and then STOP (do no further work).'
             " Only ask when truly blocked; otherwise make a reasonable assumption and proceed."
-        )
+            )
         return [
             "--name", f"job-{job_id}-{sub['idx'] + 1}", "--label", f"{JOB_LABEL}={job_id}",
             "--user", f"{s['worker_uid']}:{s['worker_uid']}", "--cpus", str(s["worker_cpu"]),
@@ -1514,7 +1583,7 @@ class JobEngine:
         s = self.settings
         with self.lock, self._db() as db:
             running_total = db.execute("SELECT COUNT(*) FROM subtasks WHERE status='running'").fetchone()[0]
-            jobs = db.execute("SELECT id, started_at, skills, project_path, base_branch, token_budget, cost_budget FROM jobs WHERE stage='running' AND archived=0 ORDER BY created_at").fetchall()
+            jobs = db.execute("SELECT id, started_at, skills, project_path, base_branch, token_budget, cost_budget, execution_runtime FROM jobs WHERE stage='running' AND archived=0 ORDER BY created_at").fetchall()
             active_jobs = [j["id"] for j in jobs if db.execute(
                 "SELECT 1 FROM subtasks WHERE job_id=? AND status='running' LIMIT 1", (j["id"],)).fetchone()]
             for job in jobs:
@@ -1522,7 +1591,12 @@ class JobEngine:
                     return
                 if job["id"] not in active_jobs and len(active_jobs) >= s["max_parallel_jobs"]:
                     continue
-                if not s["sandbox"]:
+                runtime = self.herdr if job["execution_runtime"] == "herdr" else self.docker
+                if job["execution_runtime"] == "herdr" and not self.herdr.ready():
+                    self._move(db, job["id"], "failed", "Herdr runtime unavailable", error="Start the configured local Jobs Herdr session before running this job",
+                               finished_at=_now(), detail="Herdr required")
+                    continue
+                if job["execution_runtime"] == "docker" and not s["sandbox"]:
                     self._move(db, job["id"], "failed", "Jobs sandbox is off", error="Jobs need JOBS_SANDBOX=1 and the sandbox service enabled",
                                finished_at=_now(), detail="Sandbox required")
                     continue
@@ -1582,8 +1656,8 @@ class JobEngine:
                             self._event(db, job["id"], "worker", f"subtask {sub['idx'] + 1} worktree failed: {exc}")
                             continue
                     try:
-                        container = self.docker.run_detached(self._worker_args(
-                            job["id"], dict(sub), worker_skills, upstream, profile, project_worktree,
+                        container = runtime.run_detached(self._worker_args(
+                            job["id"], dict(sub), worker_skills, upstream, profile, project_worktree, job["execution_runtime"],
                         ))
                     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                         db.execute("UPDATE subtasks SET status='failed', error=?, finished_at=? WHERE job_id=? AND idx=?",
@@ -1607,6 +1681,9 @@ class JobEngine:
                     db.execute("UPDATE subtasks SET status='running', container=?, started_at=? WHERE job_id=? AND idx=?",
                                (container, _now(), job["id"], sub["idx"]))
                     self._event(db, job["id"], "worker", f"subtask {sub['idx'] + 1} started ({container[:12]})")
+                    if job["execution_runtime"] == "herdr":
+                        db.execute("UPDATE worker_attempts SET usage_available=0, input_tokens=NULL, output_tokens=NULL, cost=NULL "
+                                   "WHERE job_id=? AND idx=? AND attempt=?", (job["id"], sub["idx"], attempt))
                     running_total += 1
                     running_here += 1
                     if job["id"] not in active_jobs:
@@ -1642,27 +1719,54 @@ class JobEngine:
         timeout = self.settings["job_timeout_minutes"] * 60
         with self.lock, self._db() as db:
             subs = db.execute(
-                "SELECT s.*, j.started_at AS job_started FROM subtasks s JOIN jobs j ON j.id=s.job_id WHERE s.status='running'"
+                "SELECT s.*, j.started_at AS job_started, j.execution_runtime FROM subtasks s JOIN jobs j ON j.id=s.job_id "
+                "WHERE s.status='running' OR (j.execution_runtime='herdr' AND s.status='waiting_input')"
             ).fetchall()
             for sub in subs:
-                status, code = self.docker.state(sub["container"])
+                runtime = self.herdr if sub["execution_runtime"] == "herdr" else self.docker
                 timed_out = sub["job_started"] and _now() - sub["job_started"] > timeout
+                try:
+                    status, code = runtime.state(sub["container"])
+                except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                    if timed_out:
+                        error = f"exceeded {self.settings['job_timeout_minutes']} min; last runtime error: {exc}"
+                        try:
+                            runtime.remove(sub["container"])
+                        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as stop_error:
+                            error += f"; worker stop not confirmed: {stop_error}"
+                        db.execute("UPDATE subtasks SET status='timeout', error=?, finished_at=? WHERE job_id=? AND idx=?",
+                                   (error[:1000], _now(), sub["job_id"], sub["idx"]))
+                        db.execute("UPDATE worker_attempts SET status='timeout', error=?, finished_at=? WHERE job_id=? AND idx=? AND container=?",
+                                   (error[:1000], _now(), sub["job_id"], sub["idx"], sub["container"]))
+                        self._event(db, sub["job_id"], "worker", f"subtask {sub['idx'] + 1} timeout")
+                        continue
+                    db.execute("UPDATE subtasks SET error=? WHERE job_id=? AND idx=?", (str(exc)[:1000], sub["job_id"], sub["idx"]))
+                    continue
+                if status == "blocked" and not timed_out:
+                    db.execute("UPDATE subtasks SET status='waiting_input', runtime_state='blocked', error=NULL WHERE job_id=? AND idx=?",
+                               (sub["job_id"], sub["idx"]))
+                    db.execute("UPDATE worker_attempts SET status='waiting_input' WHERE job_id=? AND idx=? AND container=?",
+                               (sub["job_id"], sub["idx"], sub["container"]))
+                    if sub["status"] != "waiting_input":
+                        self._event(db, sub["job_id"], "comms", f"subtask {sub['idx'] + 1} needs input in its existing Herdr session")
+                    continue
                 if status in ("running", "created", "restarting") and not timed_out:
                     continue
-                raw = self.docker.logs(sub["container"]) if status else ""
+                raw = runtime.logs(sub["container"]) if status and status != "missing" else ""
                 attempt = db.execute("SELECT COALESCE(MAX(attempt), 1) FROM worker_attempts WHERE job_id=? AND idx=?",
                                      (sub["job_id"], sub["idx"])).fetchone()[0]
                 log_file = self.job_dir(sub["job_id"]) / ".logs" / f"subtask-{sub['idx'] + 1}-attempt-{attempt}.jsonl"
                 log_file.parent.mkdir(parents=True, exist_ok=True)
                 log_file.write_text(raw, encoding="utf-8")
-                self.docker.remove(sub["container"])
+                if sub["execution_runtime"] == "docker" or timed_out:
+                    runtime.remove(sub["container"])
                 text, errors = parse_opencode_events(raw)
-                usage = parse_opencode_usage(raw)
+                usage = parse_opencode_usage(raw) if sub["execution_runtime"] == "docker" else {"input_tokens": None, "output_tokens": None, "cost": None}
                 pending_question = self._comms_pending(sub["job_id"], sub["idx"])
-                if timed_out and status in ("running", "created", "restarting"):
+                if timed_out and status in ("running", "created", "restarting", "blocked"):
                     new_status, err = "timeout", f"exceeded {self.settings['job_timeout_minutes']} min"
-                elif status is None:
-                    new_status, err = "failed", "worker container disappeared"
+                elif status is None or status == "missing":
+                    new_status, err = "failed", "worker session disappeared" if sub["execution_runtime"] == "herdr" else "worker container disappeared"
                 elif pending_question:
                     new_status, err = "waiting_input", "worker asked a question"
                 elif code == 0 and not errors:
@@ -1674,9 +1778,9 @@ class JobEngine:
                     (new_status, code, text[:50000], err, _now(), sub["job_id"], sub["idx"]),
                 )
                 db.execute("UPDATE worker_attempts SET status=?, finished_at=?, exit_code=?, error=?, log_path=? "
-                           ", input_tokens=?, output_tokens=?, cost=? WHERE job_id=? AND idx=? AND attempt=?",
+                           ", input_tokens=?, output_tokens=?, cost=?, usage_available=? WHERE job_id=? AND idx=? AND attempt=?",
                            (new_status, _now(), code, err, str(log_file), usage["input_tokens"], usage["output_tokens"],
-                            usage["cost"], sub["job_id"], sub["idx"], attempt))
+                            usage["cost"], int(sub["execution_runtime"] == "docker"), sub["job_id"], sub["idx"], attempt))
                 self._event(db, sub["job_id"], "worker", f"subtask {sub['idx'] + 1} {new_status}" + (f": {err}" if err else ""))
             # Cascade failures: a queued subtask whose dependency failed (or timed
             # out / was stopped) can never run, so fail it — and, transitively,
@@ -1730,7 +1834,7 @@ class JobEngine:
             rows = db.execute(
                 "SELECT s.job_id, s.idx, s.title, s.instructions, s.rounds, j.title AS job_title, j.description"
                 " FROM subtasks s JOIN jobs j ON j.id=s.job_id"
-                " WHERE s.status='waiting_input' AND j.stage='running' AND j.archived=0"
+                " WHERE s.status='waiting_input' AND j.stage='running' AND j.archived=0 AND j.execution_runtime='docker'"
             ).fetchall()
         for row in rows:
             key = (row["job_id"], row["idx"])

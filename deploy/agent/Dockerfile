@@ -4,6 +4,7 @@ ARG HERMES_IMAGE=nousresearch/hermes-agent:latest
 FROM ${HERMES_IMAGE}
 
 ARG OPENCODE_VERSION=latest
+ARG TARGETARCH
 ARG WORKBENCH_VERSION=dev
 # Tag list of the repo this image is published from; forks override it.
 ARG WORKBENCH_UPDATE_URL=https://api.github.com/repos/josephsandorvoros/ai-workbench/tags?per_page=50
@@ -22,9 +23,21 @@ RUN npm install -g --prefix /usr/local --allow-scripts=opencode-ai "opencode-ai@
     && npm cache clean --force \
     && opencode --version
 
+RUN case "${TARGETARCH}" in \
+        amd64) arch=x86_64; checksum=14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d ;; \
+        arm64) arch=aarch64; checksum=17d7536f2da50859523680ef279dffcac8e4a235f4e46fe8da6c2ec44141897c ;; \
+        *) exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-${arch}" -o /usr/local/bin/herdr \
+    && printf '%s  %s\n' "$checksum" /usr/local/bin/herdr | sha256sum --check \
+    && chmod 0755 /usr/local/bin/herdr \
+    && herdr --version \
+    && curl -fsSL https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/LICENSE -o /usr/share/licenses/ai-workbench/HERDR-LICENSE
+
 COPY --chmod=0755 dashboard_server.py /opt/workbench/dashboard_server.py
 COPY hermes_live.py /opt/workbench/hermes_live.py
 COPY jobs_engine.py /opt/workbench/jobs_engine.py
+COPY herdr_runtime.py /opt/workbench/herdr_runtime.py
 COPY opencode_config.py /opt/workbench/opencode_config.py
 COPY hermes_config.py /opt/workbench/hermes_config.py
 COPY provider_catalog.py /opt/workbench/provider_catalog.py
@@ -41,7 +54,8 @@ COPY --chmod=0755 deploy/agent/workbench-update /usr/local/bin/workbench-update
 COPY deploy/agent/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
 RUN chmod 0755 /etc/s6-overlay/s6-rc.d/workbench-api/run /etc/s6-overlay/s6-rc.d/workbench-api/finish \
     /etc/s6-overlay/s6-rc.d/opencode-server/run /etc/s6-overlay/s6-rc.d/opencode-server/finish \
-    /etc/s6-overlay/s6-rc.d/sandbox-reaper/run /etc/s6-overlay/s6-rc.d/hermes-serve/run
+    /etc/s6-overlay/s6-rc.d/sandbox-reaper/run /etc/s6-overlay/s6-rc.d/hermes-serve/run \
+    /etc/s6-overlay/s6-rc.d/herdr-server/run
 
 ENV WORKBENCH_API=1 \
     WORKBENCH_VERSION=${WORKBENCH_VERSION} \

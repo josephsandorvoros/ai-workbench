@@ -14,6 +14,8 @@ The terminal token is not an SSH password and not a login for the whole website.
 
 Use the terminal shortcuts to open the Hermes TUI or OpenCode when available. Those sessions use the harness's own configuration and permissions. Main OpenCode settings are independent of worker defaults; see [Models & connections](#help/connections).
 
+**Herdr TUI** attaches to the same named Herdr session used by [Jobs](#help/jobs). The Jobs Herdr server must already be running. Workspaces, agent panes, and status appear inside the CLI terminal. **Detach**, or `Ctrl+B` then `Q`, closes that client without stopping the server or its workers. Herdr actions inside the terminal can still stop panes or agents; detaching is different from shutting down the Herdr server.
+
 On managed appliance installs, new login shells prefer the recovery-aware Workbench Hermes launcher over persistent user-local shims. If a shell opened before an update still uses a stale path, open a **New shell** and inspect `command -v hermes`. Do not remove persistent data to repair a launcher path.
 
 ## Version information

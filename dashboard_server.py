@@ -2852,6 +2852,10 @@ class DashboardState:
         self._cleanup_terminals()
         if mode == "tui":
             argv = [self.hermes_cli, "--tui"]
+        elif mode == "herdr":
+            if not self.jobs.herdr.ready():
+                raise ValueError("The configured Jobs Herdr server is unavailable")
+            argv = [self.jobs.herdr.binary, "--session", self.jobs.herdr.session]
         else:
             argv = ["/bin/bash", "-li"]
 
@@ -2862,6 +2866,9 @@ class DashboardState:
         fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         env = os.environ.copy()
         env.setdefault("TERM", "xterm-256color")
+        if mode == "herdr":
+            env = {key: value for key, value in env.items() if key in {"PATH", "HOME", "LANG", "LC_ALL"}}
+            env.update(TERM="xterm-256color", COLORTERM="truecolor", HERDR_DISABLE_SOUND="1")
 
         proc = subprocess.Popen(
             argv,
@@ -3451,8 +3458,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 job = jobs.create(str(body.get("title") or ""), str(body.get("description") or ""),
                                   body.get("attachments"), body.get("skills"), body.get("profile_id"),
                                   body.get("project_path"), body.get("base_branch") or "",
-                                  body.get("token_budget"), body.get("cost_budget"))
+                                  body.get("token_budget"), body.get("cost_budget"), body.get("execution_runtime"))
                 self._send_json({"ok": True, "job": job}, status=201)
+                return
+            if len(parts) == 6 and parts[3] == "subtasks" and parts[4].isdigit() and parts[5] == "input":
+                if not self._require_terminal_auth():
+                    return
+                job = jobs.message_worker(parts[2], int(parts[4]), body.get("text"), key=body.get("key") is True)
+                self._send_json({"ok": True, "job": job})
                 return
             if (len(parts) == 6 and parts[3] == "subtasks" and parts[4].isdigit()
                     and parts[5] == "merge" and jobs.get_job(parts[2])):
@@ -4411,10 +4424,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             mode = str(body.get("mode", "cli")).lower()
             cols = int(body.get("cols", 120))
             rows = int(body.get("rows", 32))
-            if mode not in {"cli", "tui"}:
-                self._send_json({"ok": False, "message": "mode must be 'cli' or 'tui'"}, status=400)
+            if mode not in {"cli", "tui", "herdr"}:
+                self._send_json({"ok": False, "message": "mode must be 'cli', 'tui', or 'herdr'"}, status=400)
                 return
-            sid = self.state.start_terminal(mode=mode, cols=max(cols, 20), rows=max(rows, 8))
+            try:
+                sid = self.state.start_terminal(mode=mode, cols=max(cols, 20), rows=max(rows, 8))
+            except (ValueError, OSError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=503)
+                return
             self._send_json({"ok": True, "session_id": sid})
             return
 

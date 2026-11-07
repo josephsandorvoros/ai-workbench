@@ -68,6 +68,7 @@ The CSS's Inter/system-font names are fallback preferences, not evidence that th
 | --- | --- | --- |
 | Hermes Agent | MIT, copyright 2025 Nous Research | Keep its license and inspect the exact image's Python/native dependencies and any generated/bundled material. |
 | OpenCode | MIT, copyright 2025 opencode | Keep license, inspect exact installed/bundled dependencies and native executables; updating the CLI can change this inventory. |
+| Herdr | Apache-2.0, pinned 0.9.5 | Agent image preserves the tagged root LICENSE. Audit the exact binary's embedded/native dependencies and notices before publishing; this addition does not complete the pending release review. |
 | uv 0.11.16 | MIT OR Apache-2.0, copyright 2025 Astral Software Inc. | MIT alternative selected for uv itself; do not treat the copied binary's embedded dependencies as covered by that alone. The extra MIT notice below accompanies the binary-only copy. |
 | PyYAML 6.0.3 | MIT | Retain Ingy dot Net / Kirill Simonov notices and inspect any bundled LibYAML/native component. |
 | Node.js | MIT plus bundled third-party notices | Preserve Node's complete notice bundle, not just the project MIT heading. |

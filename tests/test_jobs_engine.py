@@ -55,6 +55,15 @@ class FakeHermes:
         return self.replies.pop(0)
 
 
+class FakeSessionRuntime(FakeDocker):
+    def ready(self):
+        return True
+
+    def message(self, reference, text, key=False):
+        self.last_message = (reference, text, key)
+        self.containers[reference][0] = "running"
+
+
 def plan_reply(n=2, clear=True, questions=None):
     return "Sure!\n```json\n" + json.dumps({
         "clear": clear, "questions": questions or [],
@@ -111,6 +120,137 @@ def deps_fix_reply(depends_on=[0]):
 
 
 class JobEngineTests(unittest.TestCase):
+    def test_herdr_workers_resume_in_place_without_docker_or_requeue(self):
+        engine = self.engine([plan_reply(1)])
+        engine.herdr = FakeSessionRuntime()
+        engine.settings["sandbox"] = False
+        job = engine.create("Persistent task", "go", execution_runtime="herdr")
+        self.settle(engine)
+        engine.approve(job["id"])
+        self.settle(engine)
+        sub = engine.get_job(job["id"])["subtasks"][0]
+        reference = sub["container"]
+        self.assertFalse(sub["attempts"][0]["usage_available"])
+        self.assertIsNone(sub["attempts"][0]["input_tokens"])
+        engine.herdr.containers[reference][0] = "blocked"
+        engine._check_workers()
+        self.assertEqual(engine.get_job(job["id"])["subtasks"][0]["status"], "waiting_input")
+        engine.message_worker(job["id"], 0, "Continue with the smaller scope")
+        self.assertEqual(engine.herdr.last_message, (reference, "Continue with the smaller scope", False))
+        self.assertEqual(engine.get_job(job["id"])["subtasks"][0]["container"], reference)
+        self.assertEqual(len(engine.herdr.runs), 1)
+        self.assertEqual(self.docker.runs, [])
+        self.assertNotIn("one-shot", engine.herdr.runs[0][-1])
+        engine.herdr.finish(reference, text="Complete")
+        engine._check_workers()
+        result = engine.get_job(job["id"])["subtasks"][0]
+        self.assertEqual(result["status"], "done")
+        self.assertFalse(result["attempts"][0]["usage_available"])
+        self.assertIsNone(result["attempts"][0]["input_tokens"])
+        self.assertEqual(engine.herdr.removed, [])
+        engine.stop(job["id"])
+
+    def test_herdr_budget_accounting_is_not_faked(self):
+        engine = self.engine([])
+        with self.assertRaisesRegex(ValueError, "accounting"):
+            engine.create("Bounded work", "go", execution_runtime="herdr", token_budget=100)
+
+    def test_paused_herdr_worker_still_times_out(self):
+        engine = self.engine([plan_reply(1)])
+        engine.herdr = FakeSessionRuntime()
+        job = engine.create("Paused work", "go", execution_runtime="herdr")
+        self.settle(engine)
+        engine.approve(job["id"])
+        self.settle(engine)
+        reference = engine.get_job(job["id"])["subtasks"][0]["container"]
+        engine.herdr.containers[reference][0] = "blocked"
+        engine._check_workers()
+        with engine._db() as db:
+            db.execute("UPDATE jobs SET started_at=1 WHERE id=?", (job["id"],))
+        engine._check_workers()
+        self.assertEqual(engine.get_job(job["id"])["subtasks"][0]["status"], "timeout")
+        self.assertIn(reference, engine.herdr.removed)
+
+    def test_stopping_herdr_preserves_the_last_screen_and_attempt(self):
+        engine = self.engine([plan_reply(1)])
+        engine.herdr = FakeSessionRuntime()
+        job = engine.create("Stop safely", "go", execution_runtime="herdr")
+        self.settle(engine)
+        engine.approve(job["id"])
+        self.settle(engine)
+        reference = engine.get_job(job["id"])["subtasks"][0]["container"]
+        engine.herdr.containers[reference][2] = "Last worker screen"
+        engine.stop(job["id"])
+        sub = engine.get_job(job["id"])["subtasks"][0]
+        self.assertEqual(sub["attempts"][0]["status"], "stopped")
+        self.assertEqual(engine.subtask_log(job["id"], 0), "Last worker screen")
+
+    def test_summary_uses_the_actual_job_root_and_artifact_manifest(self):
+        engine = self.engine([plan_reply(1), "Summary"])
+        job = engine.create("Real paths", "go")
+        self.settle(engine)
+        engine.approve(job["id"])
+        self.settle(engine)
+        artifact = engine.job_dir(job["id"]) / "subtask-1/artifacts/note.txt"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("ready")
+        self.docker.finish(engine.get_job(job["id"])["subtasks"][0]["container"])
+        self.settle(engine)
+        self.assertIn(str(engine.job_dir(job["id"]).resolve()), engine.hermes.prompts[-1])
+        self.assertIn("subtask-1/artifacts/note.txt", engine.hermes.prompts[-1])
+
+    def test_invalid_herdr_status_does_not_disable_timeout(self):
+        engine = self.engine([plan_reply(1)])
+        engine.herdr = FakeSessionRuntime()
+        job = engine.create("Malformed result", "go", execution_runtime="herdr")
+        self.settle(engine)
+        engine.approve(job["id"])
+        self.settle(engine)
+        reference = engine.get_job(job["id"])["subtasks"][0]["container"]
+        with engine._db() as db:
+            db.execute("UPDATE jobs SET started_at=1 WHERE id=?", (job["id"],))
+        with patch.object(engine.herdr, "state", side_effect=ValueError("Invalid completion")):
+            engine._check_workers()
+        self.assertEqual(engine.get_job(job["id"])["subtasks"][0]["status"], "timeout")
+        self.assertIn(reference, engine.herdr.removed)
+
+    def test_invalid_herdr_log_does_not_prevent_stop(self):
+        engine = self.engine([plan_reply(1)])
+        engine.herdr = FakeSessionRuntime()
+        job = engine.create("Unreadable result", "go", execution_runtime="herdr")
+        self.settle(engine)
+        engine.approve(job["id"])
+        self.settle(engine)
+        reference = engine.get_job(job["id"])["subtasks"][0]["container"]
+        with patch.object(engine.herdr, "logs", side_effect=ValueError("Invalid completion")):
+            engine.stop(job["id"])
+        self.assertEqual(engine.get_job(job["id"])["stage"], "stopped")
+        self.assertIn(reference, engine.herdr.removed)
+
+    def test_unavailable_herdr_does_not_fall_back_to_docker(self):
+        engine = self.engine([plan_reply(1)])
+        engine.herdr.ready = lambda: False
+        job = engine.create("Herdr only", "go", execution_runtime="herdr")
+        self.settle(engine)
+        engine.approve(job["id"])
+        self.settle(engine)
+        self.assertEqual(engine.get_job(job["id"])["stage"], "failed")
+        self.assertEqual(self.docker.runs, [])
+
+    def test_execution_runtime_is_snapshotted_per_job(self):
+        engine = self.engine([])
+        docker_job = engine.create("Existing execution", "go")
+        engine.settings["execution_runtime"] = "herdr"
+        herdr_job = engine.create("Local execution", "go")
+        self.assertEqual(engine.get_job(docker_job["id"])["execution_runtime"], "docker")
+        self.assertEqual(herdr_job["execution_runtime"], "herdr")
+        self.assertEqual(engine.create("Explicit execution", "go", execution_runtime="docker")["execution_runtime"], "docker")
+
+    def test_unknown_execution_runtime_is_rejected(self):
+        engine = self.engine([])
+        with self.assertRaisesRegex(ValueError, "Worker runtime"):
+            engine.create("Unknown runtime", "go", execution_runtime="other")
+
     def test_hosted_profile_does_not_receive_another_providers_default_key(self):
         engine = self.engine([])
         engine.worker_config = lambda: {"model": "anthropic/default", "base_url": "", "api_key": "anthropic-secret",
@@ -210,6 +350,7 @@ class JobEngineTests(unittest.TestCase):
                 db.execute("INSERT INTO jobs (id, title, stage) VALUES ('old', 'Existing job', 'done')")
             engine = JobEngine(db_path, Path(root) / "workspace", lambda prompt: "")
             self.assertEqual(engine.get_job("old")["attachments"], [])
+            self.assertEqual(engine.get_job("old")["execution_runtime"], "docker")
             self.assertEqual(engine.get_job("old")["skills"], [])
             self.assertEqual(engine.list_jobs()[0]["title"], "Existing job")
 

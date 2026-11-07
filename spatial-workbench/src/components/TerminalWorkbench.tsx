@@ -9,7 +9,7 @@ import { Icon } from "./Icon";
 
 const POLL_MS = 200;
 
-type ShellMode = "cli" | "tui";
+type ShellMode = "cli" | "tui" | "herdr";
 
 async function terminalFetch(path: string, token: string, body?: unknown) {
   const response = await fetch(path, {
@@ -147,6 +147,7 @@ export function TerminalWorkbench({ active, updates, onRefreshUpdates }: {
   const canConnect = Boolean(token) || !tokenRequired;
   const [tokenDraft, setTokenDraft] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionMode, setSessionMode] = useState<ShellMode>("cli");
   const [status, setStatus] = useState<string>("");
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -214,6 +215,7 @@ export function TerminalWorkbench({ active, updates, onRefreshUpdates }: {
           `/api/terminal/output?session_id=${encodeURIComponent(sessionId)}&offset=${offset}`,
           token,
         );
+        if (stopped || sessionRef.current !== sessionId) return;
         if (payload.data) termRef.current?.write(payload.data);
         offset = payload.next_offset ?? offset;
         if (!payload.running) {
@@ -251,6 +253,7 @@ export function TerminalWorkbench({ active, updates, onRefreshUpdates }: {
         const payload = await terminalFetch("/api/terminal/start", token, { mode, cols: term.cols, rows: term.rows });
         sessionRef.current = payload.session_id;
         setSessionId(payload.session_id);
+        setSessionMode(mode);
         term.focus();
         if (initialCommand) {
           window.setTimeout(() => {
@@ -267,14 +270,14 @@ export function TerminalWorkbench({ active, updates, onRefreshUpdates }: {
   const runCommand = useCallback(
     (command: string) => {
       const sid = sessionRef.current;
-      if (sid) {
+      if (sid && sessionMode === "cli") {
         void terminalFetch("/api/terminal/input", token, { session_id: sid, data: `${command}\r` });
         termRef.current?.focus();
       } else {
         void startSession("cli", command);
       }
     },
-    [startSession, token],
+    [startSession, token, sessionMode],
   );
 
   const stopSession = useCallback(async () => {
@@ -283,8 +286,8 @@ export function TerminalWorkbench({ active, updates, onRefreshUpdates }: {
     await terminalFetch("/api/terminal/close", token, { session_id: sid }).catch(() => undefined);
     sessionRef.current = null;
     setSessionId(null);
-    setStatus("Session closed");
-  }, [token]);
+    setStatus(sessionMode === "herdr" ? "Detached from Herdr" : "Session closed");
+  }, [token, sessionMode]);
 
   return (
     <section className="terminal-workbench">
@@ -294,6 +297,9 @@ export function TerminalWorkbench({ active, updates, onRefreshUpdates }: {
         </button>
         <button className="btn secondary small" type="button" disabled={!canConnect} onClick={() => void startSession("tui")}>
           Hermes TUI
+        </button>
+        <button className="btn secondary small" type="button" disabled={!canConnect} aria-pressed={!!sessionId && sessionMode === "herdr"} onClick={() => void startSession("herdr")}>
+          Herdr TUI
         </button>
         <button className="btn secondary small" type="button" disabled={!canConnect} onClick={() => runCommand("opencode")}>
           OpenCode
@@ -310,9 +316,9 @@ export function TerminalWorkbench({ active, updates, onRefreshUpdates }: {
           </button>
         ) : null}
         <button className="btn danger small" type="button" disabled={!sessionId} onClick={() => void stopSession()}>
-          Close
+          {sessionMode === "herdr" ? "Detach" : "Close"}
         </button>
-        <span className="terminal-status muted">{sessionId ? "Connected" : status || "Not connected"}</span>
+        <span className="terminal-status muted">{sessionId ? sessionMode === "herdr" ? "Connected · Herdr TUI" : "Connected" : status || "Not connected"}</span>
       </div>
 
       {!canConnect ? (

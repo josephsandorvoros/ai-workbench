@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { prepareAttachment } from "../agent/attachments";
 import { fetchAgentSkills, type AgentSkill } from "../agent/agentData";
+import { useAgentProvider } from "../agent/agentStore";
 import { compatClient } from "../api/compatClient";
-import { removePlanSubtask, type Plan, type WorkerProfile } from "../agent/jobPlan";
+import { JOB_LANES, jobLaneFor, removePlanSubtask, workerScreenText, type Plan, type WorkerProfile } from "../agent/jobPlan";
 import { Icon } from "./Icon";
+import { Markdown } from "./Markdown";
 import { saveOpenCodeSettings } from "./OpenCodeSettings";
 
-type WorkerAttempt = { attempt: number; status: string; started_at?: number; finished_at?: number; error?: string; project_branch?: string; project_merged_at?: number | null; input_tokens?: number; output_tokens?: number; cost?: number };
-type Subtask = { idx: number; title: string; status: string; result?: string; error?: string; depends_on?: number[]; wave?: number; attempts?: WorkerAttempt[] };
+type WorkerAttempt = { attempt: number; status: string; started_at?: number; finished_at?: number; error?: string; project_branch?: string; project_merged_at?: number | null; input_tokens?: number | null; output_tokens?: number | null; cost?: number | null; usage_available?: number };
+type Subtask = { idx: number; title: string; status: string; runtime_state?: string | null; result?: string; error?: string; depends_on?: number[]; wave?: number; attempts?: WorkerAttempt[] };
 type Job = {
   id: string; title: string; description: string; stage: string; detail: string; archived: number;
+  execution_runtime?: "docker" | "herdr";
   project_path?: string | null; base_branch?: string | null;
   token_budget?: number | null; cost_budget?: number | null;
   created_at: number; updated_at: number; questions: string[] | null; answers: string[] | null;
@@ -17,13 +20,12 @@ type Job = {
   events?: Array<{ ts: number; message: string }>;
 };
 type UploadedFile = { path: string; name: string; size: number };
-type Settings = { plan_gate: boolean; auto_approve: boolean; worker_model: string; max_workers_per_job: number };
+type Settings = { plan_gate: boolean; auto_approve: boolean; worker_model: string; max_workers_per_job: number; execution_runtime?: "docker" | "herdr"; runtime_available?: { docker: boolean; herdr: boolean } };
 type CommsEntry = { ts: number; round: number; question?: string; answer?: string };
 type CommsThread = { idx: number; title: string; status: string; rounds: number; pending: string | null; entries: CommsEntry[] };
 type WorkerProfileDraft = Omit<WorkerProfile, "created_at" | "updated_at" | "id"> & { id?: string };
 type ProjectChanges = { branch: string; base_branch: string; files: string[]; uncommitted: string[]; diff: string; diff_truncated: boolean; working_diff: string; working_diff_truncated: boolean; merged_at: number | null; worker_status: string };
 
-const LANES = ["inbox", "review", "needs_input", "planned", "running", "replanning", "collating", "done", "failed", "stopped"];
 const FINISHED = ["done", "failed", "stopped"];
 // Mirrors MOVE_TARGETS in jobs_engine.py: where a job may be moved from each stage.
 const MOVE_TARGETS: Record<string, string[]> = {
@@ -34,9 +36,9 @@ const MOVE_TARGETS: Record<string, string[]> = {
 };
 const MOVE_LABELS: Record<string, string> = { running: "running (re-run workers)" };
 
-async function request<T>(path: string, body?: object): Promise<T> {
+async function request<T>(path: string, body?: object, token?: string): Promise<T> {
   const response = await fetch(`/api/jobs${path}`, body === undefined ? undefined : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json", ...(token ? { "X-Terminal-Token": token } : {}) }, body: JSON.stringify(body),
   });
   const text = await response.text();
   let result: { ok?: boolean; message?: string };
@@ -54,6 +56,7 @@ function dateTime(timestamp: number) {
 }
 
 export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; onOpenFiles?: (jobId: string) => void }) {
+  const provider = useAgentProvider();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -92,6 +95,24 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
   const [projectChanges, setProjectChanges] = useState<Record<number, ProjectChanges>>({});
   const [tokenBudget, setTokenBudget] = useState("");
   const [costBudget, setCostBudget] = useState("");
+  const [executionRuntime, setExecutionRuntime] = useState<"docker" | "herdr" | "">("");
+  const [workerMessages, setWorkerMessages] = useState<Record<number, string>>({});
+  const selectedRuntime = executionRuntime || settings?.execution_runtime || "docker";
+
+  async function sendWorkerInput(idx: number, text: string, key = false) {
+    if (!selectedId) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await request<{ job: Job }>(`/${encodeURIComponent(selectedId)}/subtasks/${idx}/input`, { text, key }, provider.terminalToken);
+      setSelected(response.job);
+      if (!key) setWorkerMessages((current) => ({ ...current, [idx]: "" }));
+    } catch (failure) {
+      setError(String(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function refreshProfiles() {
     try {
@@ -303,11 +324,15 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
           </div>
         </div>)}</div>
       </section>}
-      {creating && <form className="jobs-create" onSubmit={(event) => { event.preventDefault(); if (!busy && !uploading) void perform("", { title, description, attachments: attachments.map((file) => file.path), skills: selectedSkills, profile_id: selectedProfileId || null, project_path: projectPath.trim() || null, base_branch: baseBranch.trim() || "", token_budget: tokenBudget ? Number(tokenBudget) : null, cost_budget: costBudget ? Number(costBudget) : null }); }}>
+      {creating && <form className="jobs-create" onSubmit={(event) => { event.preventDefault(); if (!busy && !uploading) void perform("", { title, description, attachments: attachments.map((file) => file.path), skills: selectedSkills, profile_id: selectedProfileId || null, project_path: projectPath.trim() || null, base_branch: baseBranch.trim() || "", token_budget: selectedRuntime === "docker" && tokenBudget ? Number(tokenBudget) : null, cost_budget: selectedRuntime === "docker" && costBudget ? Number(costBudget) : null, execution_runtime: selectedRuntime }); }}>
         <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} required /></label>
         <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} maxLength={20000} /></label>
         <label>Default worker profile<select value={selectedProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}><option value="">Use board defaults</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.model}</option>)}</select></label>
-        <div className="jobs-budget-fields"><label>Token budget<input type="number" min="1" step="1" value={tokenBudget} onChange={(event) => setTokenBudget(event.target.value)} placeholder="No cap" /></label><label>Spend budget (USD)<input type="number" min="0.01" step="0.01" value={costBudget} onChange={(event) => setCostBudget(event.target.value)} placeholder="No cap" /></label></div>
+        <label>Worker runtime<select aria-label="Worker runtime" value={selectedRuntime} onChange={(event) => setExecutionRuntime(event.target.value as "docker" | "herdr")}>
+          <option value="docker" disabled={settings?.runtime_available?.docker === false}>Docker sandbox</option>
+          <option value="herdr" disabled={!settings?.runtime_available?.herdr}>Herdr sessions{!settings?.runtime_available?.herdr ? " (unavailable)" : ""}</option>
+        </select></label>
+        <div className="jobs-budget-fields"><label>Token budget<input type="number" min="1" step="1" disabled={selectedRuntime === "herdr"} value={tokenBudget} onChange={(event) => setTokenBudget(event.target.value)} placeholder={selectedRuntime === "herdr" ? "Usage unavailable" : "No cap"} /></label><label>Spend budget (USD)<input type="number" min="0.01" step="0.01" disabled={selectedRuntime === "herdr"} value={costBudget} onChange={(event) => setCostBudget(event.target.value)} placeholder={selectedRuntime === "herdr" ? "Usage unavailable" : "No cap"} /></label></div>
         <p className="jobs-budget-note">Budgets stop queued workers after completed usage crosses the cap. Workers already running can finish.</p>
         <details className="jobs-project-options"><summary>Project repository (optional)</summary>
           <label>Workspace path<input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="projects/my-app" /></label>
@@ -334,17 +359,17 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
               </li>)}</ul>}
             </>}
           </div>
-          <button className="btn primary small" type="submit" disabled={busy || uploading || !title.trim()}>{uploading ? "Uploading..." : "Create job"}</button>
+          <button className="btn primary small" type="submit" disabled={busy || uploading || !title.trim() || settings?.runtime_available?.[selectedRuntime] === false}>{uploading ? "Uploading..." : "Create job"}</button>
       </form>}
       {error && <p className="jobs-error" role="alert">{error}</p>}
       <div className="jobs-lanes">
-        {[...LANES, ...(showArchived ? ["archived"] : [])].map((lane) => {
-          const laneJobs = jobs.filter((job) => lane === "archived" ? job.archived : !job.archived && job.stage === lane);
-          return <section className="jobs-lane" key={lane} aria-label={`${lane.replace("_", " ")} jobs`}>
-            <h3>{lane.replace("_", " ")} <span>{laneJobs.length}</span></h3>
+        {[...JOB_LANES, ...(showArchived ? [{ id: "archived", label: "Archived" }] : [])].map((lane) => {
+          const laneJobs = jobs.filter((job) => lane.id === "archived" ? job.archived : !job.archived && jobLaneFor(job) === lane.id);
+          return <section className="jobs-lane" key={lane.id} aria-label={`${lane.label} jobs`}>
+            <h3>{lane.label} <span>{laneJobs.length}</span></h3>
             <div className="jobs-lane-list">
               {laneJobs.map((job) => <button className={`jobs-card ${selectedId === job.id ? "selected" : ""}`} type="button" key={job.id} onClick={() => openJob(job)}>
-                <strong>{job.title}</strong><span>{job.detail}</span>
+                <strong>{job.title}</strong><span>{lane.id === "attention" && job.stage === "running" ? `${job.subtasks.filter((task) => task.status === "waiting_input").length} worker(s) waiting for input` : job.detail}</span><small>{job.execution_runtime === "herdr" ? "Herdr" : "Docker"} · {job.stage.replace("_", " ")}</small>
                 {job.subtasks.length > 0 && <small>{job.subtasks.filter((subtask) => subtask.status === "done").length}/{job.subtasks.length} workers done</small>}
                 <time dateTime={new Date(job.created_at * 1000).toISOString()}>{dateTime(job.created_at)}</time>
               </button>)}
@@ -361,6 +386,7 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
       </div>
       {selected && <div className="jobs-detail-body">
         <p className="jobs-detail-meta">Created {dateTime(selected.created_at)} / Updated {dateTime(selected.updated_at)}</p>
+        <p className="jobs-detail-meta">{selected.execution_runtime === "herdr" ? "Herdr sessions" : "Docker sandbox"}</p>
         {MOVE_TARGETS[selected.stage]?.length > 0 && !selected.archived && <section>
           <h4>Move job</h4>
           <p className="jobs-detail-meta">Send it back to another stage for clarification or a re-run.</p>
@@ -414,7 +440,7 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
           {subtask.error && <p className="jobs-error">{subtask.error}</p>}
           {subtask.result && <pre className="jobs-output">{subtask.result}</pre>}
           {subtask.attempts && subtask.attempts.length > 0 && <div className="jobs-attempts" aria-label={`Worker ${subtask.idx + 1} attempt history`}>
-            {subtask.attempts.map((attempt) => <span key={attempt.attempt}>Attempt {attempt.attempt}: {attempt.status} · {(attempt.input_tokens || 0) + (attempt.output_tokens || 0)} tokens · ${(attempt.cost || 0).toFixed(4)}{attempt.project_branch ? ` · ${attempt.project_branch}` : ""}{attempt.error ? ` · ${attempt.error}` : ""}</span>)}
+            {subtask.attempts.map((attempt) => <span key={attempt.attempt}>Attempt {attempt.attempt}: {attempt.status} · {attempt.usage_available === 0 ? "Usage unavailable" : `${(attempt.input_tokens || 0) + (attempt.output_tokens || 0)} tokens · $${(attempt.cost || 0).toFixed(4)}`}{attempt.project_branch ? ` · ${attempt.project_branch}` : ""}{attempt.error ? ` · ${attempt.error}` : ""}</span>)}
           </div>}
           {selected.project_path && subtask.attempts?.some((attempt) => attempt.project_branch) && <div className="jobs-project-actions">
             <button className="btn secondary small" type="button" onClick={async () => {
@@ -433,7 +459,15 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
             {projectChanges[subtask.idx].uncommitted.length > 0 && <><p className="jobs-error">Uncommitted worker changes: {projectChanges[subtask.idx].uncommitted.join(", ")}</p>{projectChanges[subtask.idx].working_diff && <><h5>Uncommitted tracked patch</h5><pre className="jobs-project-patch">{projectChanges[subtask.idx].working_diff}</pre>{projectChanges[subtask.idx].working_diff_truncated && <span>Working patch truncated at 100 KB.</span>}</>}</>}
           </div>}
           <button className="btn secondary small" type="button" onClick={() => { setLog(""); setLogIndex(logIndex === subtask.idx ? null : subtask.idx); }}>{logIndex === subtask.idx ? "Hide log" : "View log"}</button>
-          {logIndex === subtask.idx && <pre className="jobs-output" aria-label={`Worker ${subtask.idx + 1} log`}>{log || "No log yet"}</pre>}
+          {logIndex === subtask.idx && <pre className="jobs-output" aria-label={`Worker ${subtask.idx + 1} log`}>{(selected.execution_runtime === "herdr" ? workerScreenText(log) : log) || "No log yet"}</pre>}
+          {selected.execution_runtime === "herdr" && selected.stage === "running" && subtask.status === "waiting_input" && <form onSubmit={(event) => { event.preventDefault(); void sendWorkerInput(subtask.idx, workerMessages[subtask.idx] || ""); }}>
+            <label>Reply to worker {subtask.idx + 1}<textarea rows={2} maxLength={20000} value={workerMessages[subtask.idx] || ""} onChange={(event) => setWorkerMessages((current) => ({ ...current, [subtask.idx]: event.target.value }))} /></label>
+            <div className="jobs-project-actions">
+              <button className="btn primary small" type="submit" disabled={busy || !workerMessages[subtask.idx]?.trim()}>Send message</button>
+              <button className="btn secondary small" type="button" disabled={busy} title="Send Escape to the worker's dialog" onClick={() => void sendWorkerInput(subtask.idx, "esc", true)}><Icon name="x" size={14} /> Escape</button>
+              <button className="btn secondary small" type="button" disabled={busy} title="Send Enter to the worker's dialog" onClick={() => void sendWorkerInput(subtask.idx, "enter", true)}><Icon name="check" size={14} /> Enter</button>
+            </div>
+          </form>}
           {FINISHED.includes(selected.stage) && ["failed", "timeout"].includes(subtask.status) && <button className="btn secondary small" type="button" disabled={busy} onClick={() => void perform(`/${selected.id}/subtasks/${subtask.idx}/retry`)}>Retry worker</button>}
         </div>)}</section>}
         {comms.length > 0 && <section><h4>Clarifications</h4>
@@ -446,7 +480,7 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
             {thread.pending && <p className="jobs-comms-pending"><span>Waiting on coordinator</span>{thread.pending}</p>}
           </div>)}
         </section>}
-        {selected.summary && <section><h4>Final summary</h4><p className="jobs-text">{selected.summary}</p></section>}
+        {selected.summary && <section><h4>Final summary</h4><Markdown content={selected.summary} /></section>}
         {selected.subtasks.length > 0 && <button className="btn secondary small" type="button" onClick={() => onOpenFiles?.(selected.id)}>Open files in Projects</button>}
         {selected.events && <section><h4>Timeline</h4><ol className="jobs-timeline">{selected.events.map((event, index) => <li key={index}><time>{dateTime(event.ts)}</time><span>{event.message}</span></li>)}</ol></section>}
         <div className="jobs-actions">

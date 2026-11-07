@@ -49,9 +49,9 @@ The composer provides push-to-talk, an editable transcript, and explicit Send th
 
 ## Jobs board
 
-A job board where Hermes reviews a request, splits it into subtasks, and isolated OpenCode workers (sandbox containers) execute them. Subtasks are independent by default and run in parallel; a subtask that needs another's output declares it with `depends_on` (0-based indices, kept a DAG) and runs only after its dependencies finish. Upstream artifacts are staged into each dependent worker's workdir so it can read them. Workers can ask clarifying questions mid-run (answered by Hermes), and with the tighter loop on, Hermes reviews each wave and may append another. See [deploy/README.md](deploy/README.md#jobs-hermes-plans-opencode-workers-execute) for the full pipeline, variables, and API.
+A job board where Hermes reviews a request, splits it into subtasks, and OpenCode workers execute them using Docker sandboxing or the opt-in persistent Herdr runtime. New jobs snapshot their selected runtime; existing jobs keep Docker execution. Subtasks declare `depends_on` when they need another worker's output, and upstream artifacts are staged for those dependent workers. Docker workers use coordinator clarification/requeue; Herdr workers accept replies in their existing sessions. The board groups internal stages into six lanes and surfaces paused workers under Needs attention. See [deploy/README.md](deploy/README.md#herdr-local-pilot) for the local Herdr pilot and deployment limits.
 
-Jobs also support reusable worker profiles, optional isolated Git worktrees with explicit local review/merge, per-worker retry history, streamed logs, and optional token/spend budgets. Worker profiles are separate from interactive chat/provider profiles; project workers never push or merge without an explicit board action.
+Jobs also support reusable worker profiles, optional isolated Git worktrees with explicit local review/merge, per-worker retry history, and streamed logs. Token/spend budgets currently require Docker worker usage reporting; Herdr usage remains unavailable. Worker profiles are separate from interactive chat/provider profiles; project workers never push or merge without an explicit board action.
 
 ## Live app previews
 

@@ -8,6 +8,7 @@ Open **Terminal** to see installed and latest versions. The header's update indi
 | Hermes Agent | Use its **Update** button for a managed runtime update |
 | Workbench image | Re-pull the image and redeploy through your deployment process |
 | Sandbox | Re-pull the sandbox image and redeploy through your deployment process |
+| Herdr | Pinned in the agent image; update through a tested Workbench image release, not a separate in-app updater |
 
 The update-method note appears beside each component's current status. Hermes and OpenCode buttons remain visible, but are disabled when no update is available or the update path is unsupported. Version checks and notes do not trigger updates.
 
@@ -25,7 +26,7 @@ Release files persist in the Hermes data volume across container recreation, but
 
 ## Update OpenCode
 
-Use the **OpenCode -> Update** button and confirm after finishing active OpenCode work and jobs. The action opens a shell, installs the supported update, and shows its output in Terminal. Appliance installs use `workbench-update opencode`, which installs into the persistent data volume and attempts to restart the headless OpenCode server. If that restart is unavailable, the output asks for an administrator-managed container restart. Use **Check now** after completion to refresh the displayed version. Worker containers have their own image and credentials; updating main OpenCode does not update existing workers.
+Use the **OpenCode -> Update** button and confirm after finishing active OpenCode work and jobs. The action opens a shell, installs the supported update, and shows its output in Terminal. Appliance installs use `workbench-update opencode`, which installs into the persistent data volume and attempts to restart the headless OpenCode server. If that restart is unavailable, the output asks for an administrator-managed container restart. Use **Check now** after completion to refresh the displayed version. Docker workers have their own image and credentials. Herdr workers use the primary agent runtime; an already-running process does not become the new OpenCode version just because the binary changes. Finish worker sessions before updating and verify a new session afterward.
 
 ## Before an update
 
@@ -36,6 +37,8 @@ Use the **OpenCode -> Update** button and confirm after finishing active OpenCod
 5. Afterward, verify connections, workspace files, and worker behavior before starting important work.
 
 Help pages are bundled with the installed frontend. Updating the app updates these pages; opening Help does not fetch live documentation or change the installation.
+
+Herdr's named server keeps worker processes separate from a browser TUI client. **Detach** is not a server shutdown. A local companion API restart can reconnect to persisted worker references while the Herdr server remains running; restarting the container or Herdr server stops its actual processes. Do not assume interrupted work will safely resume after that broader restart. Preserve job state, review what completed, and retry deliberately.
 
 ## What to back up
 

@@ -19,9 +19,19 @@ Do not post API keys or full private configuration into a chat while troubleshoo
 
 Open its detail drawer. **Needs input** waits for an answer; **Planned** may wait for approval. Read the worker's latest attempt, log, and error before retrying.
 
-Confirm Jobs sandboxing is enabled and running. For a private worker endpoint, check `SANDBOX_ALLOW_LAN`; worker `localhost` is not the host. A missing explicitly named profile key fails the launch. Inspect dependencies and upstream artifacts when a downstream task is blocked.
+Check the job's saved execution runtime. Docker jobs require enabled sandboxing; private Docker worker endpoints may need `SANDBOX_ALLOW_LAN`, and their `localhost` is not the agent host. Herdr jobs require the configured named Herdr server, not the Docker sandbox. A missing explicitly named profile key fails either launch. Inspect dependencies and upstream artifacts when a downstream task is blocked.
+
+For a paused Herdr worker, read its current screen and reply through the existing session instead of retrying it. Token-mode controls require the CLI panel's terminal token. A dialog may need Escape or Enter rather than a new prompt; inspect it before acting. If the runtime reports idle but the task remains unfinished, check its completion record and verification notes rather than treating idle as success.
 
 Deliverables must be under the worker's `artifacts/` directory. Other files can still be visible in **Projects**. Retry is a new attempt and can consume additional usage. See [Jobs](#help/jobs) and [Worker profiles](#help/worker-profiles).
+
+## Herdr sessions or TUI are unavailable
+
+In the appliance, confirm that the agent image includes Herdr and that `JOB_WORKER_RUNTIME=herdr` or `JOB_HERDR_ENABLED=1` is configured. Herdr runs in the agent container without another overlay or network port. Inspect the `herdr-server` service logs through the normal deployment tooling. The board enables Herdr only when that server responds.
+
+For the existing local app, verify the installed binary and the exact configured session with `herdr --session workbench-jobs status server`; replace the session name if `JOB_HERDR_SESSION` differs. A local administrator must start the named headless server with the documented clean environment. Do not start a second server, switch to an unrelated default session, or stop an active server merely to clear an availability error.
+
+**Herdr TUI** needs the same terminal authentication as the CLI shell. Detaching should leave workers running. If a container or Herdr-server restart interrupted them, inspect the retained attempts and artifacts before retrying; live processes do not survive that restart. See [Terminal](#help/terminal) and [Deployment reference](#help/deployment-reference).
 
 ## Saving reports a conflict
 

@@ -1,0 +1,12 @@
+#!/command/with-contenv sh
+set -eu
+if [ "${JOB_WORKER_RUNTIME:-docker}" != herdr ] && [ "${JOB_HERDR_ENABLED:-0}" != 1 ]; then
+    exec /command/s6-pause
+fi
+cd "${WORKSPACE_ROOT:-/workspace}"
+if [ "$(id -u)" = 0 ]; then
+    exec s6-setuidgid hermes env -i HOME=/opt/data PATH="$PATH" LANG="${LANG:-C.UTF-8}" \
+        HERDR_DISABLE_SOUND=1 herdr --session "${JOB_HERDR_SESSION:-workbench-jobs}" server
+fi
+exec env -i HOME=/opt/data PATH="$PATH" LANG="${LANG:-C.UTF-8}" \
+    HERDR_DISABLE_SOUND=1 herdr --session "${JOB_HERDR_SESSION:-workbench-jobs}" server

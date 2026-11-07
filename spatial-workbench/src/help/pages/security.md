@@ -12,20 +12,26 @@ Saved model API keys are server-side and write-only through settings APIs. An em
 
 Self-hosting the Workbench does not mean every model request stays private. Hosted models, including free models, have their own logging and training policies. Check terms before sending secrets or confidential files. Private inference configuration is not a complete network air-gap.
 
-## Two sandbox controls
+## Worker runtimes and sandbox controls
 
 | Setting | Controls |
 | --- | --- |
 | `AGENT_SANDBOX` | Hermes' own terminal backend |
-| `JOBS_SANDBOX` | Whether delegated Jobs workers can run |
+| `JOBS_SANDBOX` | Whether Docker Jobs workers can run |
+| `JOB_WORKER_RUNTIME` | Default execution runtime for new jobs: Docker or Herdr |
+| `JOB_HERDR_ENABLED` | Start the optional Herdr server when Docker remains the default |
 
 The installer defaults to direct Hermes commands with isolated Jobs workers. Isolating workers does not isolate every Hermes action. The Workbench Terminal shell remains in the agent container in every mode.
 
 The Jobs sandbox is a separate privileged Docker-in-Docker service. Worker containers have limits and network restrictions, but the sandbox is not a guarantee that arbitrary code is harmless. Keep its management ports unpublished.
 
+Herdr workers are trusted processes in the primary agent container. Their private HOME/configuration directories prevent accidental configuration overlap; they are not a hard security boundary. Workers share the agent user's filesystem and network access, and Docker worker CPU/memory/PID limits do not apply. Keep concurrency limits, job timeouts, plan approval, and explicit review enabled as appropriate. Existing jobs retain their chosen runtime.
+
+Herdr TUI and worker replies use the existing terminal authentication policy. **Detach** closes the browser's TUI client, not the Jobs server or its workers. Actions within the TUI can still affect agents and panes; access to it is powerful.
+
 ## Private network exceptions
 
-Workers normally have internet access but cannot reach private network ranges. A LAN model server needs a narrowly scoped `SANDBOX_ALLOW_LAN` IP or CIDR exception applied through the deployment configuration. Saving an endpoint in the UI does not change the firewall. Worker `localhost` is the worker container.
+Docker workers normally have internet access but cannot reach private network ranges. A LAN model server needs a narrowly scoped `SANDBOX_ALLOW_LAN` IP or CIDR exception applied through the deployment configuration. Saving an endpoint in the UI does not change the firewall. Docker worker `localhost` is its worker container. Herdr workers share the agent container's network instead; sandbox exceptions do not restrict or configure that access.
 
 For a Compose installation, the administrator sets `SANDBOX_ALLOW_LAN` in the deployment's `.env`; in Portainer, use the stack's environment variables. For example, allow only the model server's actual address rather than an entire LAN:
 

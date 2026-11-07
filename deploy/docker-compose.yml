@@ -48,6 +48,9 @@ services:
       # Optional: route Hermes' own terminal commands through isolated workers.
       AGENT_SANDBOX: ${AGENT_SANDBOX:-0}
       JOBS_SANDBOX: ${JOBS_SANDBOX:-1}
+      JOB_WORKER_RUNTIME: ${JOB_WORKER_RUNTIME:-docker}
+      JOB_HERDR_ENABLED: ${JOB_HERDR_ENABLED:-0}
+      JOB_HERDR_SESSION: ${JOB_HERDR_SESSION:-workbench-jobs}
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-}
       SANDBOX_CPU: ${SANDBOX_CPU:-}
       SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-}

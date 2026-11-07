@@ -125,6 +125,17 @@ def contract_server(extra_env=None, legacy_backups=False):
 
 
 class ApiContractTests(unittest.TestCase):
+    def test_herdr_worker_input_uses_existing_auth_and_keeps_keys_explicit(self):
+        with contract_server({"TERMINAL_API_TOKEN": "unit-test-token", "WORKBENCH_AUTH": "token"}) as server:
+            with self.assertRaises(HTTPError) as unauthorized:
+                server.post_json("/api/jobs/example/subtasks/0/input", {"text": "Continue"})
+            self.assertEqual(unauthorized.exception.code, 401)
+            with patch.object(server.server.state.jobs, "message_worker", return_value={"id": "example"}) as message:
+                status, _ = server.post_json("/api/jobs/example/subtasks/0/input", {"text": "Continue", "key": "true"},
+                                             headers={"X-Terminal-Token": "unit-test-token"})
+                self.assertEqual(status, 200)
+                message.assert_called_once_with("example", 0, "Continue", key=False)
+
     def test_workbench_chat_delete_persists_and_preserves_artifact_state(self):
         with contract_server() as server:
             state = server.server.state
@@ -1168,6 +1179,45 @@ class ApiContractTests(unittest.TestCase):
                     headers={"X-Terminal-Token": "contract-token"},
                 )
             self.assertEqual(raised.exception.code, 400)
+
+    def test_herdr_terminal_mode_routes_through_the_existing_pty_api(self):
+        with contract_server() as server:
+            with patch.object(server.server.state, "start_terminal", return_value="herdr-client") as start:
+                status, result = server.post_json("/api/terminal/start", {"mode": "herdr", "cols": 140, "rows": 40})
+                self.assertEqual(status, 200)
+                self.assertEqual(result["session_id"], "herdr-client")
+                start.assert_called_once_with(mode="herdr", cols=140, rows=40)
+
+    def test_herdr_terminal_fails_without_starting_another_server(self):
+        with contract_server() as server:
+            with patch.object(server.server.state.jobs.herdr, "ready", return_value=False), patch("dashboard_server.subprocess.Popen") as launch:
+                with self.assertRaises(HTTPError) as raised:
+                    server.post_json("/api/terminal/start", {"mode": "herdr"})
+                self.assertEqual(raised.exception.code, 503)
+                launch.assert_not_called()
+
+    def test_herdr_client_uses_named_session_without_inheriting_provider_secrets(self):
+        with contract_server() as server:
+            state = server.server.state
+            with patch.object(state.jobs.herdr, "ready", return_value=True), \
+                    patch("dashboard_server.pty.openpty", return_value=(100, 101)), \
+                    patch("dashboard_server.fcntl.ioctl"), patch("dashboard_server.os.close"), \
+                    patch("dashboard_server.threading.Thread"), patch("dashboard_server.subprocess.Popen") as launch, \
+                    patch.dict(os.environ, {"LLM_API_KEY": "private-provider-key", "TERM": "dumb"}):
+                sid = state.start_terminal("herdr", 140, 40)
+                self.assertEqual(launch.call_args.args[0], [state.jobs.herdr.binary, "--session", state.jobs.herdr.session])
+                self.assertEqual(launch.call_args.kwargs["env"]["TERM"], "xterm-256color")
+                self.assertNotIn("LLM_API_KEY", launch.call_args.kwargs["env"])
+                self.assertEqual(state.terminal_sessions[sid].mode, "herdr")
+                state.terminal_sessions.clear()
+
+    def test_herdr_tui_requires_the_existing_terminal_token(self):
+        with contract_server({"WORKBENCH_AUTH": "token", "TERMINAL_API_TOKEN": "herdr-test-token"}) as server:
+            with patch.object(server.server.state, "start_terminal") as launch:
+                with self.assertRaises(HTTPError) as raised:
+                    server.post_json("/api/terminal/start", {"mode": "herdr"})
+                self.assertEqual(raised.exception.code, 401)
+                launch.assert_not_called()
 
     def test_workflow_status_and_unknown_workflow_errors_are_structured(self):
         with contract_server() as server:
