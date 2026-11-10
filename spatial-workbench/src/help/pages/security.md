@@ -19,9 +19,9 @@ Self-hosting the Workbench does not mean every model request stays private. Host
 | `AGENT_SANDBOX` | Hermes' own terminal backend |
 | `JOBS_SANDBOX` | Whether Docker Jobs workers can run |
 | `JOB_WORKER_RUNTIME` | Default execution runtime for new jobs: Docker or Herdr |
-| `JOB_HERDR_ENABLED` | Start the optional Herdr server when Docker remains the default |
+| `JOB_HERDR_ENABLED` | Offer Herdr when Docker is the configured default |
 
-The installer defaults to direct Hermes commands with isolated Jobs workers. Isolating workers does not isolate every Hermes action. The Workbench Terminal shell remains in the agent container in every mode.
+The installer defaults to direct Hermes commands and Herdr Jobs. Docker-in-Docker workers are optional. Isolating workers does not isolate every Hermes action. The Workbench Terminal shell remains in the agent container in every mode.
 
 The Jobs sandbox is a separate privileged Docker-in-Docker service. Worker containers have limits and network restrictions, but the sandbox is not a guarantee that arbitrary code is harmless. Keep its management ports unpublished.
 

@@ -296,7 +296,7 @@ Workspace routes must preserve these safety rules:
 
 ### Jobs
 
-The job board routes are served by the companion API and backed by `jobs_engine.py`. They are only meaningful when `JOBS_SANDBOX=1`; with the sandbox off, creating a job fails when workers would start.
+The job board routes are served by the companion API and backed by `jobs_engine.py`. Herdr jobs work without Docker sandboxing. Docker jobs require `JOBS_SANDBOX=1` and the Compose `sandbox` profile; new jobs use the configured `JOB_WORKER_RUNTIME` default.
 
 `GET /api/jobs` returns:
 

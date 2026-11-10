@@ -27,7 +27,7 @@ To choose a specific release instead, set `WORKBENCH_INSTALL_TAG` when launching
 WORKBENCH_INSTALL_TAG=v0.1.48 bash install.sh
 ```
 
-The script asks for the Hermes model URL (include `/v1`), model ID, optional key, image tag, and SSH destination. It then configures **main OpenCode** and **default job workers independently**: choose `provider` for a hosted provider/model, `hermes` to reuse the Hermes endpoint (with an independently selectable model), or `custom` for another OpenAI-compatible URL/model/key. API keys are hidden when entered interactively. For custom worker endpoints it also asks for explicit sandbox LAN exceptions (IPs/CIDRs); leave this empty for public endpoints. Defaults are: image tag `latest`, Jobs sandbox **on** (`JOBS_SANDBOX=1`), Hermes terminal sandbox **off** (`AGENT_SANDBOX=0`), and both OpenCode models `opencode/big-pickle`. The installer validates and activates Compose's `sandbox` profile when Jobs sandboxing is enabled. It installs Docker Engine and Compose from Docker's official apt repository only when absent (Ubuntu/Debian), writes `/opt/spatial-workbench/.env` as mode `0600`, validates the selected pull-only Compose files, pulls images, starts the stack, and checks the UI. To preview prompts/defaults without downloading, writing files, or running Docker, use `bash install.sh --dry-run`.
+The script asks for the Hermes model URL (include `/v1`), model ID, optional key, image tag, and SSH destination. It then configures **main OpenCode** and **default job workers independently**: choose `provider` for a hosted provider/model, `hermes` to reuse the Hermes endpoint (with an independently selectable model), or `custom` for another OpenAI-compatible URL/model/key. API keys are hidden when entered interactively. Herdr is the default Jobs runtime and the installer leaves the Docker-in-Docker worker sandbox off unless you opt in at its prompt. When enabled, Docker workers are offered alongside Herdr, which remains the default for new jobs. For custom worker endpoints, the installer asks for sandbox LAN exceptions only when Docker workers are enabled. Defaults are: image tag `latest`, `JOB_WORKER_RUNTIME=herdr`, `JOBS_SANDBOX=0`, Hermes terminal sandbox off (`AGENT_SANDBOX=0`), and both OpenCode models `opencode/big-pickle`. The installer validates and activates Compose's `sandbox` profile only when Docker workers are enabled. It installs Docker Engine and Compose from Docker's official apt repository only when absent (Ubuntu/Debian), writes `/opt/spatial-workbench/.env` as mode `0600`, validates the selected pull-only Compose files, pulls images, starts the stack, and checks the UI. To preview prompts/defaults without downloading, writing files, or running Docker, use `bash install.sh --dry-run`.
 
 The UI binds to `127.0.0.1` on the VM. To open it, create an SSH tunnel from a terminal on the computer where you will use the browser (Windows Command Prompt/PowerShell or a local terminal), not from a shell already connected to the VM:
 
@@ -43,16 +43,16 @@ The model URL must be reachable **from the VM**. The installer intentionally doe
 
 ```bash
 mkdir spatial-workbench && cd spatial-workbench
-# copy docker-compose.yml, docker-compose.jobs.yml, and .env.example from this directory
+# copy docker-compose.yml and .env.example from this directory
 cp .env.example .env
 $EDITOR .env        # set LLM_BASE_URL and LLM_MODEL
-docker compose --profile sandbox -f docker-compose.yml -f docker-compose.jobs.yml config --quiet
-docker compose --profile sandbox -f docker-compose.yml -f docker-compose.jobs.yml pull
-docker compose --profile sandbox -f docker-compose.yml -f docker-compose.jobs.yml up -d
+docker compose -f docker-compose.yml config --quiet
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d
 docker compose logs -f agent   # wait for "[workbench-bootstrap] ..." and the gateway to start
 ```
 
-For `JOBS_SANDBOX=0`, omit the Jobs overlay and `--profile sandbox` from the Compose commands. Portainer: use `docker-compose.yml` as the stack file; when `JOBS_SANDBOX=1`, add `docker-compose.jobs.yml` and set the `sandbox` Compose profile (for example `COMPOSE_PROFILES=sandbox`). Set `AGENT_SANDBOX`, `JOBS_SANDBOX`, `LLM_BASE_URL`, and `LLM_MODEL` explicitly in stack environment variables. The manual Compose bind default is also loopback-only; change `WORKBENCH_BIND` only when you have restricted network access and authentication in place.
+These commands use Herdr for Jobs and do not start DinD. To add isolated Docker workers, set `JOBS_SANDBOX=1` and `JOB_HERDR_ENABLED=1`, then add `docker-compose.jobs.yml` and `--profile sandbox` to each Compose command. Portainer: use `docker-compose.yml` alone for the default Herdr setup; add `docker-compose.jobs.yml` and set the `sandbox` Compose profile (for example `COMPOSE_PROFILES=sandbox`) only when enabling Docker workers. Set `AGENT_SANDBOX`, `JOBS_SANDBOX`, `JOB_WORKER_RUNTIME`, `JOB_HERDR_ENABLED`, `LLM_BASE_URL`, and `LLM_MODEL` explicitly in stack environment variables. The manual Compose bind default is also loopback-only; change `WORKBENCH_BIND` only when you have restricted network access and authentication in place.
 
 Open `http://<vm>:1420`. In **Provider Settings** click **Use Hermes Gateway** to chat with the full Hermes agent, or use the default `/llm` endpoint for the raw model.
 
@@ -149,47 +149,42 @@ Hermes' own terminal and the Jobs worker daemon are separate controls. You can r
 
 | Mode | Settings | Hermes shell commands | Jobs / sub-agents | Use it when |
 |---|---|---|---|---|
-| Direct Hermes only | `AGENT_SANDBOX=0`, `JOBS_SANDBOX=0` | Run in the Hermes agent container, with its filesystem and network access. | Jobs worker execution is disabled and the sandbox service is not started. | You want Hermes to operate directly and do not need delegated workers. |
-| Direct Hermes + isolated Jobs (recommended) | `AGENT_SANDBOX=0`, `JOBS_SANDBOX=1` | Run in the Hermes agent container. | Jobs can run planned OpenCode subtasks in separate sandbox worker containers. Hermes reviews/plans and collates; workers execute. | You want Hermes to retain direct control while delegating task execution to isolated workers. |
-| Isolate both | `AGENT_SANDBOX=1`, `JOBS_SANDBOX=1` | Hermes terminal commands also run in temporary containers on the sandbox daemon. | Jobs worker execution is enabled. | You want all shell execution isolated, including commands Hermes runs directly. |
-| Direct Hermes + Herdr Jobs | `AGENT_SANDBOX=0`, `JOBS_SANDBOX=0`, `JOB_WORKER_RUNTIME=herdr` | Run in the agent container. | Persistent OpenCode workers run in the agent container without Docker worker isolation. | You want the simpler trusted-process runtime. |
-| Docker default + optional Herdr | `AGENT_SANDBOX=0`, `JOBS_SANDBOX=1`, `JOB_WORKER_RUNTIME=docker`, `JOB_HERDR_ENABLED=1` | Run in the agent container. | New jobs choose Docker sandbox or Herdr sessions; each job retains its choice. | You want both runtime options without changing existing jobs. |
+| Direct Hermes + Herdr Jobs (default) | `AGENT_SANDBOX=0`, `JOBS_SANDBOX=0`, `JOB_WORKER_RUNTIME=herdr` | Run in the Hermes agent container. | Persistent OpenCode workers run in the agent container. | You want the default delegated workflow without a Docker-in-Docker daemon. |
+| Herdr + optional isolated Jobs | `AGENT_SANDBOX=0`, `JOBS_SANDBOX=1`, `JOB_WORKER_RUNTIME=herdr`, `JOB_HERDR_ENABLED=1` | Run in the Hermes agent container. | New jobs default to Herdr and may select isolated Docker workers. | You want Herdr by default with Docker isolation available when needed. |
+| Isolate both | `AGENT_SANDBOX=1`, `JOBS_SANDBOX=1`, `JOB_WORKER_RUNTIME=docker` | Hermes terminal commands also run in temporary containers on the sandbox daemon. | Jobs default to isolated Docker workers. | You want Hermes shell commands and delegated workers to use Docker isolation. |
 
-The sandbox does not make Hermes powerless: it can still plan, use its non-shell tools, and manage Jobs. `AGENT_SANDBOX` controls only Hermes' own terminal backend; `JOBS_SANDBOX` controls whether the Jobs engine may start sandbox workers. The installer includes the Jobs overlay and activates the `sandbox` Compose profile when Jobs sandboxing is enabled. Manual Compose deployments must do both; Portainer deployments add the overlay and set `COMPOSE_PROFILES=sandbox`. The CLI tab's shell remains in the agent container in every mode.
+The sandbox does not make Hermes powerless: it can still plan, use its non-shell tools, and manage Jobs. `AGENT_SANDBOX` controls only Hermes' own terminal backend; `JOBS_SANDBOX` controls whether Jobs may start Docker sandbox workers. Herdr Jobs remain available with `JOBS_SANDBOX=0`. The installer includes the Jobs overlay and activates the `sandbox` Compose profile only when Docker workers are enabled. Manual Compose deployments must do both; Portainer deployments add the overlay and set `COMPOSE_PROFILES=sandbox`. The CLI tab's shell remains in the agent container in every mode.
 
 ### Turn the sandbox on or off
 
-For a Compose deployment, edit the deployment `.env`. `JOBS_SANDBOX=1` must be paired with the `sandbox` Compose profile; setting the environment variable alone does not start a profiled service. To keep Hermes direct while allowing isolated sub-agents, use:
+For a Compose deployment, edit the deployment `.env`. `JOBS_SANDBOX=1` must be paired with the `sandbox` Compose profile; setting the environment variable alone does not start a profiled service. The default Herdr-only setup is:
 
 ```env
-# Direct Hermes + isolated Jobs workers
-AGENT_SANDBOX=0
-JOBS_SANDBOX=1
-```
-
-```env
-# Direct Hermes only; no Jobs workers
 AGENT_SANDBOX=0
 JOBS_SANDBOX=0
+JOB_WORKER_RUNTIME=herdr
+JOB_HERDR_ENABLED=0
 ```
 
-To isolate both Hermes terminal commands and Jobs workers, set:
+To offer optional isolated Docker workers alongside the Herdr default, set:
 
 ```env
-AGENT_SANDBOX=1
+AGENT_SANDBOX=0
 JOBS_SANDBOX=1
+JOB_WORKER_RUNTIME=herdr
+JOB_HERDR_ENABLED=1
 ```
 
 Apply the change by selecting the matching Compose files and recreating the stack:
 
 ```bash
-# JOBS_SANDBOX=1
+# JOBS_SANDBOX=1; keep Herdr as the default and offer both runtimes
 docker compose --profile sandbox -f docker-compose.yml -f docker-compose.jobs.yml up -d --remove-orphans
-# JOBS_SANDBOX=0
+# JOBS_SANDBOX=0; Herdr-only
 docker compose -f docker-compose.yml up -d --remove-orphans
 ```
 
-In Portainer, set `AGENT_SANDBOX` and `JOBS_SANDBOX`, add the Jobs overlay file and `COMPOSE_PROFILES=sandbox` only when `JOBS_SANDBOX=1`, then use your approved stack-update procedure. `JOBS_SANDBOX=0` disables Docker worker execution, not Herdr workers. Set `JOB_WORKER_RUNTIME=herdr` for a Herdr-only setup, or `JOB_HERDR_ENABLED=1` to offer Herdr alongside the Docker default. `AGENT_SANDBOX` controls only Hermes' own terminal backend. Named volumes are retained when the sandbox service is omitted. Finish existing Docker jobs before disabling their runtime; existing jobs are not silently migrated to Herdr.
+In Portainer, set `AGENT_SANDBOX`, `JOBS_SANDBOX`, `JOB_WORKER_RUNTIME`, and `JOB_HERDR_ENABLED`; add the Jobs overlay and `COMPOSE_PROFILES=sandbox` only when `JOBS_SANDBOX=1`, then use your approved stack-update procedure. `JOBS_SANDBOX=0` disables Docker worker execution, not Herdr workers. `AGENT_SANDBOX` controls only Hermes' own terminal backend. Named volumes are retained when the sandbox service is omitted. Finish existing Docker jobs before disabling their runtime; existing jobs are not silently migrated to Herdr.
 
 After changing modes, verify agent logs show `Hermes terminal backend -> local` or `-> docker` according to `AGENT_SANDBOX`. For Docker Jobs, check `JOBS_SANDBOX=1` and the sandbox service. For Herdr Jobs, confirm the named server is running and **Herdr sessions** is available in the new-job runtime selector. Test a small job before important work.
 
@@ -216,7 +211,7 @@ Workers don't run a model — Hermes decides what to run. To let a worker do its
 
 ## Jobs (Hermes plans, OpenCode workers execute)
 
-Docker execution requires `JOBS_SANDBOX=1`. The opt-in Herdr pilot runs persistent OpenCode agents in the primary agent container instead. Each new job snapshots its selected execution runtime; existing jobs remain Docker-backed. A job moves through **Inbox → Review → (Needs input) → Planned → Running → (Replanning) → Collating → Done** (or Failed / Stopped). *Replanning* only appears when the tighter loop is on (below).
+Docker execution requires `JOBS_SANDBOX=1`. Herdr runs persistent OpenCode agents in the primary agent container and is the default runtime for new jobs. Each new job snapshots its selected execution runtime; existing jobs remain on their saved runtime. A job moves through **Inbox → Review → (Needs input) → Planned → Running → (Replanning) → Collating → Done** (or Failed / Stopped). *Replanning* only appears when the tighter loop is on (below).
 
 ### Herdr Local Pilot
 
@@ -230,7 +225,7 @@ The Jobs board groups internal states into Queue, Planning, Running, Needs atten
 
 For the existing local app, install the pinned Herdr 0.9.5 binary and start its named headless server with `herdr --session workbench-jobs server`. Start the server with a clean environment containing only HOME, PATH, and locale settings; PATH must include the actual OpenCode executable. Do not copy provider keys into the server environment. Restart only the local companion API to load changed Python code; the existing Vite frontend reads source changes. No second dashboard instance is required.
 
-For a future image deployment, set `JOB_WORKER_RUNTIME=herdr`, or keep Docker as the default and set `JOB_HERDR_ENABLED=1` to offer both. `JOB_HERDR_SESSION` defaults to `workbench-jobs`. The agent image installs checksummed Herdr 0.9.5 and supervises its headless server as the agent user. Keep the sandbox profile when Docker jobs still need it. Do not switch existing/running jobs between runtimes or delete their volumes.
+The default image deployment sets `JOB_WORKER_RUNTIME=herdr`. To offer Docker workers as an additional runtime, enable `JOBS_SANDBOX=1`, activate the sandbox profile, and set `JOB_HERDR_ENABLED=1`. `JOB_HERDR_SESSION` defaults to `workbench-jobs`. The agent image installs checksummed Herdr 0.9.5 and supervises its headless server as the agent user. Do not switch existing/running jobs between runtimes or delete their volumes.
 
 Herdr workers have private HOME/configuration directories and provider key files outside the project tree. They are still trusted processes sharing the agent user's filesystem and network; these directories are not a hard security boundary. Docker CPU/memory/PID limits and sandbox LAN restrictions do not apply to Herdr workers. Concurrency limits, job timeout, plan approval, and explicit Git merges remain enforced.
 
@@ -242,7 +237,7 @@ Local validation covered real Hermes planning/collation, real OpenCode workers, 
 
 1. **Review.** Hermes reviews the request and asks questions only when it is genuinely unclear. You can attach up to five files (10 MB each, 20 MB total); copies are stored in `/workspace/jobs/<job-id>/inputs/`. Hermes sees text excerpts, and worker instructions can refer to `../inputs/<filename>`.
 2. **Plan.** Hermes splits the work into up to `MAX_WORKERS_PER_JOB` subtasks. Subtasks are independent by default and run in parallel; when one genuinely needs another's output (e.g. "write the module" then "test the module"), it declares that with `depends_on` — a list of the 0-based indices it needs. The engine keeps the graph a DAG (out-of-range, self, and cyclic references are dropped) and runs subtasks in topological order, so a dependent subtask starts only after its dependencies finish. As a safety net, if a subtask's instructions reference another subtask's output in prose but leave `depends_on` empty, Hermes is asked once to re-emit the plan with the field filled in. With `JOB_PLAN_APPROVAL=1` (default), the job waits in *Planned* until you approve (or edit) the plan.
-3. **Run.** Each subtask runs `opencode run` in its own `spatial-workbench-worker` container on the sandbox daemon, with the same network rules as other workers. Select up to five Hermes user skills per job to copy their skill files (excluding hidden files and symlinks) into `/workspace/jobs/<job-id>/skills`; OpenCode discovers that snapshot without receiving Hermes state or credentials. Files land in `/workspace/jobs/<job-id>/subtask-N/`, and logs in `.../.logs/`.
+3. **Run.** Docker subtasks run `opencode run` in their own `spatial-workbench-worker` container on the sandbox daemon. Herdr subtasks run in persistent OpenCode sessions in the agent container. Select up to five Hermes user skills per job to copy their skill files (excluding hidden files and symlinks) into `/workspace/jobs/<job-id>/skills`; OpenCode discovers that snapshot without receiving Hermes state or credentials. Files land in `/workspace/jobs/<job-id>/subtask-N/`, and logs in `.../.logs/`.
   - **Worker profiles.** Create profiles separately from chat/provider profiles. A profile stores role instructions, OpenCode model/runtime, up to five Hermes skills, and a guarded/trusted permission preset. Choose a default profile when creating a job or override it per planned subtask. The job and each worker attempt keep a configuration snapshot; profile edits do not rewrite existing jobs. The deployment-wide `JOB_AUTO_APPROVE=0` remains the upper permission bound, even for a trusted profile.
   - **Project worktrees.** Optionally select a Git repository inside `/workspace` and a local base branch. Each worker attempt gets an isolated worktree and branch; workers commit there and never push or merge. After completion, inspect changed files and explicitly merge a clean worker branch into the configured base branch. The base repository must be clean and checked out at that base branch. Unmerged branches are preserved; deleting a job refuses uncommitted work and only removes job-owned worktrees safely. Pull-request creation is not currently supported.
    - **Upstream handoff.** A subtask with dependencies gets the upstream subtasks' artifact paths and contents in its prompt, and a copy of each upstream `artifacts/` directory is staged into its own workdir under `upstream/subtask-N/artifacts/`. OpenCode's `read`/`write` tools are scoped to the worker's own workdir, so reading a sibling subtask directory is auto-rejected (`external_directory`); the staged copy is what the worker reads.
@@ -337,4 +332,4 @@ What stays out of the browser:
 - **Settings** (provider, saved profiles, browser tools, chat sessions) live on the server, so they follow you to any browser.
 - **Terminal token** (token mode only) is kept in the browser session, not in local storage.
 
-Only port 1420 is published, bound to loopback by default. The Hermes gateway and companion API are reachable only on the internal Compose network. The Jobs sandbox uses a privileged Docker-in-Docker container; workers are isolated from the host Docker daemon, but the sandbox itself is a powerful component. Keep its management ports unpublished and review any `SANDBOX_ALLOW_LAN` exceptions carefully.
+Only port 1420 is published, bound to loopback by default. The Hermes gateway and companion API are reachable only on the internal Compose network. When enabled, the Jobs sandbox uses a privileged Docker-in-Docker container; workers are isolated from the host Docker daemon, but the sandbox itself is a powerful component. Keep its management ports unpublished and review any `SANDBOX_ALLOW_LAN` exceptions carefully.

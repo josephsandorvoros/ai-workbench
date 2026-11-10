@@ -107,11 +107,14 @@ if [[ -n "$OPENCODE_CUSTOM_BASE_URL" ]]; then
 else
   OPENCODE_MAIN_API_KEY="$CONNECTION_KEY"
 fi
-if ask_yes 'Enable isolated worker sandbox for Jobs? Uses privileged Docker-in-Docker on this VM' yes; then
+if ask_yes 'Enable optional Docker-in-Docker workers for Jobs? Uses a privileged sandbox daemon on this VM' no; then
   JOBS_SANDBOX=1
+  JOB_HERDR_ENABLED=1
 else
   JOBS_SANDBOX=0
+  JOB_HERDR_ENABLED=0
 fi
+JOB_WORKER_RUNTIME=herdr
 choose_connection 'Default job workers'
 WORKER_MODEL="$CONNECTION_MODEL"
 WORKER_BASE_URL="$CONNECTION_BASE_URL"
@@ -124,8 +127,8 @@ if [[ "$JOBS_SANDBOX" == 1 && -n "$WORKER_BASE_URL" ]]; then
 fi
 AGENT_SANDBOX=0
 
-printf '\nInstall directory: %s\nImage tag: %s\nCompose source ref: %s\nUI bind: 127.0.0.1:%s\nJobs worker sandbox: %s\nHermes terminal sandbox: %s\n' \
-  "$INSTALL_DIR" "$WORKBENCH_TAG" "$WORKBENCH_SOURCE_REF" "$WORKBENCH_PORT" "$JOBS_SANDBOX" "$AGENT_SANDBOX"
+printf '\nInstall directory: %s\nImage tag: %s\nCompose source ref: %s\nUI bind: 127.0.0.1:%s\nJobs worker runtime: %s\nDocker-in-Docker workers: %s\nHermes terminal sandbox: %s\n' \
+  "$INSTALL_DIR" "$WORKBENCH_TAG" "$WORKBENCH_SOURCE_REF" "$WORKBENCH_PORT" "$JOB_WORKER_RUNTIME" "$JOBS_SANDBOX" "$AGENT_SANDBOX"
 [[ "$INSTALL_DIR" = /* && "$INSTALL_DIR" != / ]] || die "install directory must be an absolute path"
 if (( DRY_RUN )); then
   printf 'Dry run: no files written and no Docker commands executed.\n'
@@ -199,6 +202,8 @@ grep -q '^name: spatial-workbench$' "$scratch/docker-compose.yml" || die "downlo
   env_line OPENCODE_MAIN_API_KEY "$OPENCODE_MAIN_API_KEY"
   env_line AGENT_SANDBOX "$AGENT_SANDBOX"
   env_line JOBS_SANDBOX "$JOBS_SANDBOX"
+  env_line JOB_WORKER_RUNTIME "$JOB_WORKER_RUNTIME"
+  env_line JOB_HERDR_ENABLED "$JOB_HERDR_ENABLED"
   env_line WORKER_MODEL "$WORKER_MODEL"
   env_line WORKER_BASE_URL "$WORKER_BASE_URL"
   env_line WORKER_API_KEY "$WORKER_API_KEY"

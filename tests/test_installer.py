@@ -64,7 +64,10 @@ class InstallerTests(unittest.TestCase):
     def test_install_writes_independent_private_endpoints(self):
         self.check_install(private=True)
 
-    def check_install(self, private=False):
+    def test_install_can_enable_optional_dind_workers(self):
+        self.check_install(sandbox=True)
+
+    def check_install(self, private=False, sandbox=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binaries = root / "bin"
@@ -101,8 +104,13 @@ fi
                 "INSTALL_TEST_JOBS_COMPOSE": str(COMPOSE.parent / "docker-compose.jobs.yml"),
                 "INSTALL_TEST_URL_LOG": str(root / "urls"),
             }
-            choices = ["custom", "http://main.example/v1", "org/main", "main$secret", "yes",
-                       "custom", "http://worker.example/v1", "org/worker", "worker$secret", "192.0.2.20/32"] if private else ["", "", "", "yes", "", "", ""]
+            sandbox_answer = "yes" if sandbox else ""
+            choices = ["custom", "http://main.example/v1", "org/main", "main$secret", sandbox_answer,
+                       "custom", "http://worker.example/v1", "org/worker", "worker$secret"]
+            if private and sandbox:
+                choices.append("192.0.2.20/32")
+            if not private:
+                choices = ["", "", "", sandbox_answer, "", "", ""]
             answers = "\n".join(["https://model.example/v1", "model", "test$secret", "", "", "admin@example.com", *choices, "yes"]) + "\n"
             result = subprocess.run(["bash", str(SCRIPT)], input=answers, text=True, capture_output=True, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -110,7 +118,9 @@ fi
             self.assertIn("LLM_API_KEY='test$secret'", config)
             self.assertIn("WORKBENCH_BIND='127.0.0.1'", config)
             self.assertIn("AGENT_SANDBOX='0'", config)
-            self.assertIn("JOBS_SANDBOX='1'", config)
+            self.assertIn(f"JOBS_SANDBOX='{int(sandbox)}'", config)
+            self.assertIn("JOB_WORKER_RUNTIME='herdr'", config)
+            self.assertIn(f"JOB_HERDR_ENABLED='{int(sandbox)}'", config)
             self.assertIn("WORKBENCH_TAG='latest'", config)
             self.assertIn("WORKBENCH_IMAGE_PREFIX='ghcr.io/josephsandorvoros'", config)
             expected_model = "org/main" if private else "opencode/big-pickle"
@@ -121,27 +131,37 @@ fi
                 self.assertIn("WORKER_MODEL='org/worker'", config)
                 self.assertIn("WORKER_BASE_URL='http://worker.example/v1'", config)
                 self.assertIn("WORKER_API_KEY='worker$secret'", config)
-                self.assertIn("SANDBOX_ALLOW_LAN='192.0.2.20/32'", config)
+                self.assertIn(f"SANDBOX_ALLOW_LAN='{'192.0.2.20/32' if sandbox else ''}'", config)
                 self.assertNotIn("main$secret", result.stdout + result.stderr)
                 self.assertNotIn("worker$secret", result.stdout + result.stderr)
             self.assertNotIn("COMPOSE_PROFILES", config)
             self.assertEqual(stat.S_IMODE((root / "app" / ".env").stat().st_mode), 0o600)
             self.assertEqual((root / "app" / "docker-compose.yml").read_bytes(), COMPOSE.read_bytes())
-            self.assertEqual(
-                (root / "app" / "docker-compose.jobs.yml").read_bytes(),
-                (COMPOSE.parent / "docker-compose.jobs.yml").read_bytes(),
-            )
+            if sandbox:
+                self.assertEqual(
+                    (root / "app" / "docker-compose.jobs.yml").read_bytes(),
+                    (COMPOSE.parent / "docker-compose.jobs.yml").read_bytes(),
+                )
+            else:
+                self.assertFalse((root / "app" / "docker-compose.jobs.yml").exists())
             urls = (root / "urls").read_text(encoding="utf-8")
             self.assertIn("https://raw.githubusercontent.com/josephsandorvoros/ai-workbench/main/deploy/docker-compose.yml", urls)
-            self.assertIn("https://raw.githubusercontent.com/josephsandorvoros/ai-workbench/main/deploy/docker-compose.jobs.yml", urls)
+            if sandbox:
+                self.assertIn("https://raw.githubusercontent.com/josephsandorvoros/ai-workbench/main/deploy/docker-compose.jobs.yml", urls)
+            else:
+                self.assertNotIn("docker-compose.jobs.yml", urls)
             self.assertIn("ssh -N -o ExitOnForwardFailure=yes -L 18420:127.0.0.1:1420 admin@example.com", result.stdout)
             self.assertIn("http://127.0.0.1:18420", result.stdout)
             self.assertNotIn("test$secret", result.stdout + result.stderr)
             recorded = commands.read_text(encoding="utf-8")
             self.assertLess(recorded.index("config --quiet"), recorded.index(" pull"))
             self.assertLess(recorded.index(" pull"), recorded.index(" up -d"))
-            self.assertIn("-f " + str(root / "app" / "docker-compose.jobs.yml"), recorded)
-            self.assertIn("--profile sandbox", recorded)
+            if sandbox:
+                self.assertIn("-f " + str(root / "app" / "docker-compose.jobs.yml"), recorded)
+                self.assertIn("--profile sandbox", recorded)
+            else:
+                self.assertNotIn("-f " + str(root / "app" / "docker-compose.jobs.yml"), recorded)
+                self.assertNotIn("--profile sandbox", recorded)
             docker = shutil.which("docker")
             if docker:
                 parsed = subprocess.run([
@@ -153,15 +173,18 @@ fi
                 self.assertEqual(services["agent"]["environment"]["LLM_API_KEY"], "test$$secret")
                 self.assertEqual(services["web"]["ports"][0]["host_ip"], "127.0.0.1")
                 self.assertEqual(services["agent"]["environment"]["OPENCODE_MODEL"], expected_model)
+                self.assertEqual(services["agent"]["environment"]["JOBS_SANDBOX"], str(int(sandbox)))
+                self.assertEqual(services["agent"]["environment"]["JOB_WORKER_RUNTIME"], "herdr")
                 if private:
                     self.assertEqual(services["agent"]["environment"]["WORKER_BASE_URL"], "http://worker.example/v1")
-                profiled = subprocess.run([
-                    docker, "compose", "--profile", "sandbox", "--env-file", str(root / "app" / ".env"),
-                    "-f", str(root / "app" / "docker-compose.yml"), "-f", str(root / "app" / "docker-compose.jobs.yml"),
-                    "config", "--format", "json",
-                ], text=True, capture_output=True)
-                self.assertEqual(profiled.returncode, 0, profiled.stderr)
-                self.assertIn("sandbox", json.loads(profiled.stdout)["services"])
+                if sandbox:
+                    profiled = subprocess.run([
+                        docker, "compose", "--profile", "sandbox", "--env-file", str(root / "app" / ".env"),
+                        "-f", str(root / "app" / "docker-compose.yml"), "-f", str(root / "app" / "docker-compose.jobs.yml"),
+                        "config", "--format", "json",
+                    ], text=True, capture_output=True)
+                    self.assertEqual(profiled.returncode, 0, profiled.stderr)
+                    self.assertIn("sandbox", json.loads(profiled.stdout)["services"])
                 effective = subprocess.run([
                     docker, "compose", "--env-file", str(root / "app" / ".env"),
                     "-f", str(root / "app" / "docker-compose.yml"), "config", "--environment",

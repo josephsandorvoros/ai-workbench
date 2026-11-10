@@ -27,7 +27,7 @@ Full-screen captures of the live workspaces: [Projects](screenshots/projects-wor
 
 New to AI Workbench? Start with the [plain-language overview](WORKBENCH_OVERVIEW.md).
 
-See the [deployment guide](deploy/README.md) for the latest-by-default CLI installer and manual Compose setup. The default install binds to loopback for SSH-tunnel access, runs Jobs workers in the isolated sandbox, and uses OpenCode Big Pickle unless you choose another OpenCode model. Hermes still requires an OpenAI-compatible model endpoint for chat, job planning, and collation.
+See the [deployment guide](deploy/README.md) for the latest-by-default CLI installer and manual Compose setup. The default install binds to loopback for SSH-tunnel access and runs Jobs workers with Herdr; isolated Docker-in-Docker workers are optional. OpenCode Big Pickle is the default worker model unless you choose another model. Hermes still requires an OpenAI-compatible model endpoint for chat, job planning, and collation.
 
 ## In-app help
 

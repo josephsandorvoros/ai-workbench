@@ -1,8 +1,8 @@
 # AI Workbench appliance — single-VM deployment (pulls published images).
 #
 #   cp .env.example .env    # set LLM_BASE_URL (+ LLM_MODEL), optionally auth
-#   docker compose --profile sandbox pull
-#   docker compose --profile sandbox up -d
+#   docker compose pull
+#   docker compose up -d
 #
 # Works as-is in Portainer: paste this file and set the variables in the stack.
 # UI: http://<vm>:${WORKBENCH_PORT:-1420}
@@ -47,8 +47,8 @@ services:
       UPDATE_CHECK: ${UPDATE_CHECK:-1}
       # Optional: route Hermes' own terminal commands through isolated workers.
       AGENT_SANDBOX: ${AGENT_SANDBOX:-0}
-      JOBS_SANDBOX: ${JOBS_SANDBOX:-1}
-      JOB_WORKER_RUNTIME: ${JOB_WORKER_RUNTIME:-docker}
+      JOBS_SANDBOX: ${JOBS_SANDBOX:-0}
+      JOB_WORKER_RUNTIME: ${JOB_WORKER_RUNTIME:-herdr}
       JOB_HERDR_ENABLED: ${JOB_HERDR_ENABLED:-0}
       JOB_HERDR_SESSION: ${JOB_HERDR_SESSION:-workbench-jobs}
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-}
