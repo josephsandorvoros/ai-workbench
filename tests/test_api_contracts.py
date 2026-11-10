@@ -1463,6 +1463,89 @@ class ApiContractTests(unittest.TestCase):
             self.assertTrue(initialized["ok"])
             self.assertTrue((path / "README.md").is_file())
 
+    def test_git_host_tokens_are_write_only_and_can_be_cleared(self):
+        with contract_server() as server:
+            _, saved = server.post_json("/api/git/hosts", {
+                "host": "https://GitHub.com/", "provider": "github", "token": "private-access-token",
+            })
+            self.assertEqual(saved["hosts"], [{
+                "host": "github.com", "provider": "github", "username": "", "token_set": True,
+            }])
+            _, listed = server.get_json("/api/git/hosts")
+            self.assertNotIn("private-access-token", json.dumps(listed))
+            settings_path = server.temp_root / "hermes" / "spatial-workbench" / "settings.json"
+            stored = json.loads(settings_path.read_text(encoding="utf-8"))
+            secret_name = server.server.state._git_secret_name("github.com")
+            self.assertEqual(stored["secrets"][secret_name], "private-access-token")
+
+            server.post_json("/api/git/hosts", {
+                "host": "github.com", "provider": "github", "token": "",
+            })
+            self.assertEqual(json.loads(settings_path.read_text(encoding="utf-8"))["secrets"][secret_name], "private-access-token")
+
+            _, cleared = server.post_json("/api/git/hosts", {
+                "host": "github.com", "provider": "github", "clear_token": True,
+            })
+            self.assertFalse(cleared["hosts"][0]["token_set"])
+            self.assertNotIn(secret_name, json.loads(settings_path.read_text(encoding="utf-8"))["secrets"])
+            server.post_json("/api/git/hosts", {
+                "host": "github.com", "provider": "github", "token": "private-access-token",
+            })
+            _, deleted = server.post_json("/api/git/hosts/delete", {"host": "github.com"})
+            self.assertEqual(deleted["deleted"], "github.com")
+            self.assertNotIn(secret_name, json.loads(settings_path.read_text(encoding="utf-8"))["secrets"])
+
+    def test_git_host_credentials_reject_invalid_hosts_and_forgejo_without_username(self):
+        with contract_server() as server:
+            for body in (
+                {"host": "http://github.com", "provider": "github", "token": "secret"},
+                {"host": "forgejo.example", "provider": "forgejo", "token": "secret"},
+            ):
+                with self.subTest(body=body), self.assertRaises(HTTPError) as raised:
+                    server.post_json("/api/git/hosts", body)
+                self.assertEqual(raised.exception.code, 400)
+
+    def test_workspace_git_clone_uses_saved_host_token_without_returning_it(self):
+        with contract_server() as server:
+            server.post_json("/api/git/hosts", {
+                "host": "github.com", "provider": "github", "token": "private-access-token",
+            })
+            with patch.object(dashboard_server.git_remote, "clone_repository", return_value={
+                "path": "projects/repo", "branch": "main", "remote": "https://github.com/o/r.git", "host": "github.com",
+            }) as clone:
+                _, result = server.post_json("/api/workspace/git/clone", {
+                    "url": "https://github.com/o/r.git", "destination": "projects/repo",
+                })
+            self.assertTrue(result["ok"])
+            self.assertEqual(clone.call_args.kwargs["credentials"]["token"], "private-access-token")
+            self.assertNotIn("private-access-token", json.dumps(result))
+
+    def test_workspace_git_clone_rejects_non_https_and_outside_destination(self):
+        with contract_server() as server:
+            for body in (
+                {"url": "http://github.com/o/r.git", "destination": "projects/repo"},
+                {"url": "https://github.com/o/r.git", "destination": "../outside"},
+            ):
+                with self.subTest(body=body), self.assertRaises(HTTPError) as raised:
+                    server.post_json("/api/workspace/git/clone", body)
+                self.assertEqual(raised.exception.code, 400)
+
+    def test_job_publish_requires_confirmation_and_returns_review_link(self):
+        with contract_server() as server:
+            job = server.server.state.jobs.create("Publish test", "Description")
+            path = f"/api/jobs/{job['id']}/subtasks/0/publish"
+            with patch.object(server.server.state.jobs, "publish_project_worker", return_value={
+                "url": "https://github.com/acme/repo/pull/1", "provider": "github", "branch": "jobs/test",
+                "base_branch": "main", "already_exists": False,
+            }) as publish:
+                with self.assertRaises(HTTPError) as raised:
+                    server.post_json(path, {"title": "Review"})
+                self.assertEqual(raised.exception.code, 409)
+                publish.assert_not_called()
+                _, result = server.post_json(path, {"confirm": True, "title": "Review", "body": "Details"})
+            self.assertEqual(result["publish"]["url"], "https://github.com/acme/repo/pull/1")
+            publish.assert_called_once_with(job["id"], 0, "Review", "Details")
+
     def test_workspace_git_init_ignores_excluded_files_but_creates_commit(self):
         with contract_server() as server:
             path = server.workspace_root / "projects" / "ignored-smoke"

@@ -37,4 +37,6 @@ Delete does not undo an agent task or stop a running worker. Check the selected 
 
 Project jobs need a Git repository inside the workspace and a local base branch. If the project is not yet a repository, use the Git setup controls to preview the proposed initialization and review the files before confirming. Do not commit secrets or generated credentials.
 
+To bring in an existing project, choose **Clone Git repo** and enter its HTTPS URL and a new folder under `projects/`. Public repositories can be cloned without a token. For private repositories, expand **Git host credentials**, choose GitHub, GitLab, or Forgejo, and save a host-scoped access token. Tokens are write-only in the UI and stored in the companion settings file with mode `0600`; they are not encrypted at rest. SSH URLs and credentials embedded in URLs are not supported.
+
 Read [Worker profiles & project review](#help/worker-profiles) before allowing workers to change a repository. They work in separate worktrees, and merging is an explicit action.

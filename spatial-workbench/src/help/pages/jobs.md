@@ -4,7 +4,7 @@ Open **Job Board** and select **New job**. Give the job a clear title and descri
 
 Choose **Docker sandbox** or **Herdr sessions** under Worker runtime. Deployments default new jobs to Herdr; Docker is available only when its sandbox daemon is enabled. Herdr is available only when its configured local server is running. The chosen runtime is saved with the job; changing a default does not move existing jobs between runtimes.
 
-For repository work, expand **Project repository (optional)** and select a Git repository in the workspace plus its local base branch. See [Worker profiles & project review](#help/worker-profiles).
+For repository work, first clone the HTTPS repository in **Projects** or initialize a workspace folder as Git, then expand **Project repository (optional)** and select it with its local base branch. See [Worker profiles & project review](#help/worker-profiles).
 
 ## Follow the plan
 

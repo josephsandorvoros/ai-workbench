@@ -157,6 +157,22 @@ export interface WorkspaceGitPreview {
   inventory_hash: string;
 }
 
+export type GitProvider = "github" | "gitlab" | "forgejo";
+
+export interface GitHostConnection {
+  host: string;
+  provider: GitProvider;
+  username: string;
+  token_set: boolean;
+}
+
+export interface WorkspaceGitClone {
+  path: string;
+  branch: string;
+  remote: string;
+  host: string;
+}
+
 export interface WorkspaceListResponse {
   ok: boolean;
   root: string;
@@ -374,6 +390,14 @@ export const compatClient = {
     postJson<{ ok: boolean; path: string; branch: string; commit: string }>("/api/workspace/git/initialize", {
       path, branch, inventory_hash: inventoryHash, confirm_existing: confirmExisting,
     }),
+  getGitHosts: () => getJson<{ ok: boolean; hosts: GitHostConnection[] }>("/api/git/hosts"),
+  saveGitHost: (host: string, provider: GitProvider, username: string, token: string) =>
+    postJson<{ ok: boolean; hosts: GitHostConnection[] }>("/api/git/hosts", { host, provider, username, token }),
+  clearGitHostToken: (host: string, provider: GitProvider, username: string) =>
+    postJson<{ ok: boolean; hosts: GitHostConnection[] }>("/api/git/hosts", { host, provider, username, clear_token: true }),
+  deleteGitHost: (host: string) => postJson<{ ok: boolean; deleted: string }>("/api/git/hosts/delete", { host }),
+  cloneWorkspaceGit: (url: string, destination: string) =>
+    postJson<{ ok: boolean } & WorkspaceGitClone>("/api/workspace/git/clone", { url, destination }),
   uploadFile: (filename: string, contentBase64: string) =>
     postJson<{ ok: boolean; path: string; name: string; size: number }>("/api/workspace/upload", {
       filename,

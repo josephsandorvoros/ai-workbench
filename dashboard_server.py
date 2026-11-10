@@ -43,6 +43,7 @@ from hermes_runtime import RuntimeManager
 from free_models import tracker as free_model_tracker
 import speech_services
 import app_preview
+import git_remote
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -356,6 +357,7 @@ class DashboardState:
         jobs_db = os.getenv("JOBS_DB", "").strip() or HERMES_HOME / "spatial-workbench" / "jobs.db"
         self.jobs = JobEngine(jobs_db, self.workspace_root, self._hermes_job_call, skills_root=HERMES_HOME / "skills",
                       worker_config=lambda: connection_settings(os.environ, HERMES_HOME, "worker"))
+        self.jobs.git_credentials = self.git_credentials_for_host
         self.event_lock = threading.Lock()
         self.events = []
         self.max_events = 500
@@ -1506,6 +1508,94 @@ class DashboardState:
                     value = None
             self._write_settings(data)
         return {"ok": True, "set": bool(value)}
+
+    @staticmethod
+    def _git_secret_name(host):
+        return "git:" + hashlib.sha256(host.encode("utf-8")).hexdigest()
+
+    def get_git_hosts(self):
+        with self.workbench_state_lock:
+            data = self._read_settings()
+            secrets = data.get("secrets") or {}
+            entries = data.get("git_hosts") or []
+            hosts = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    host, provider = git_remote.validate_host_provider(entry.get("host"), entry.get("provider"))
+                except ValueError:
+                    continue
+                hosts.append({"host": host, "provider": provider,
+                              "username": str(entry.get("username") or ""),
+                              "token_set": bool(secrets.get(self._git_secret_name(host)))})
+        return {"ok": True, "hosts": sorted(hosts, key=lambda item: item["host"])}
+
+    def save_git_host(self, patch):
+        if not isinstance(patch, dict):
+            raise ValueError("Git host settings must be an object")
+        host, provider = git_remote.validate_host_provider(patch.get("host"), patch.get("provider"))
+        username = str(patch.get("username") or "").strip()
+        token = patch.get("token")
+        clear_token = patch.get("clear_token") is True
+        if len(username) > 200 or any(ord(char) < 32 for char in username):
+            raise ValueError("Git username is invalid")
+        if provider == "forgejo" and token and not username:
+            raise ValueError("Forgejo access tokens require a username")
+        if token is not None and (not isinstance(token, str) or len(token) > 4096 or any(ord(char) < 32 for char in token)):
+            raise ValueError("Git access token is invalid")
+        with self.workbench_state_lock:
+            data = self._read_settings()
+            entries = data.get("git_hosts")
+            entries = entries if isinstance(entries, list) else []
+            entries = [item for item in entries if not isinstance(item, dict) or item.get("host") != host]
+            entries.append({"host": host, "provider": provider, "username": username})
+            data["git_hosts"] = entries
+            secrets = data.setdefault("secrets", {})
+            secret_name = self._git_secret_name(host)
+            if clear_token:
+                secrets.pop(secret_name, None)
+            elif isinstance(token, str) and token:
+                secrets[secret_name] = token
+            self._write_settings(data)
+        return self.get_git_hosts()
+
+    def delete_git_host(self, raw_host):
+        host = git_remote.normalize_host(raw_host)
+        with self.workbench_state_lock:
+            data = self._read_settings()
+            data["git_hosts"] = [entry for entry in (data.get("git_hosts") or [])
+                                 if not isinstance(entry, dict) or entry.get("host") != host]
+            (data.setdefault("secrets", {})).pop(self._git_secret_name(host), None)
+            self._write_settings(data)
+        return {"ok": True, "deleted": host}
+
+    def git_credentials_for_host(self, raw_host):
+        host = git_remote.normalize_host(raw_host)
+        with self.workbench_state_lock:
+            data = self._read_settings()
+            entry = next((item for item in (data.get("git_hosts") or [])
+                          if isinstance(item, dict) and item.get("host") == host), None)
+            if not entry:
+                return None
+            try:
+                stored_host, provider = git_remote.validate_host_provider(entry.get("host"), entry.get("provider"))
+            except ValueError:
+                return None
+            if stored_host != host:
+                return None
+            return {"host": host, "provider": provider, "username": entry.get("username", ""),
+                    "token": (data.get("secrets") or {}).get(self._git_secret_name(host), "")}
+
+    def clone_workspace_git(self, remote_url, destination):
+        remote = git_remote.parse_remote_url(remote_url)
+        result = git_remote.clone_repository(
+            self.workspace_root, remote.url, destination,
+            credentials=self.git_credentials_for_host(remote.host),
+        )
+        self.record_event("workspace_git_clone", "Remote Git repository cloned",
+                          {"path": result["path"], "host": result["host"]})
+        return result
 
     def _hermes_job_call(self, prompt):
         # Resolved per call so a rotated gateway key is picked up without a restart.
@@ -3473,6 +3563,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._send_json({"ok": True, "merge": result})
                 return
             if (len(parts) == 6 and parts[3] == "subtasks" and parts[4].isdigit()
+                    and parts[5] == "publish" and jobs.get_job(parts[2])):
+                if body.get("confirm") is not True:
+                    raise ValueError("Confirm pushing this worker branch and creating a review request")
+                result = jobs.publish_project_worker(parts[2], int(parts[4]), body.get("title"), body.get("body", ""))
+                self._send_json({"ok": True, "publish": result, "job": jobs.get_job(parts[2])})
+                return
+            if (len(parts) == 6 and parts[3] == "subtasks" and parts[4].isdigit()
                     and parts[5] == "retry" and jobs.get_job(parts[2])):
                 jobs.retry_subtask(parts[2], int(parts[4]))
                 self._send_json({"ok": True, "job": jobs.get_job(parts[2])})
@@ -3714,6 +3811,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/settings":
             self._send_json(self.state.get_settings())
+            return
+        if self.path.split("?", 1)[0] == "/api/git/hosts":
+            self._send_json(self.state.get_git_hosts())
             return
         if self.path.split("?", 1)[0] == "/api/jobs" or self.path.startswith("/api/jobs/"):
             self._jobs_get()
@@ -4203,6 +4303,29 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._send_json({"ok": False, "message": str(exc)}, status=404)
                 return
             self._send_json({"ok": True, "deleted": profile_id})
+            return
+        if clean_path in ("/api/git/hosts", "/api/git/hosts/delete", "/api/workspace/git/clone"):
+            try:
+                body = self._read_json_body()
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be a JSON object")
+                if clean_path == "/api/git/hosts":
+                    payload = self.state.save_git_host(body)
+                elif clean_path == "/api/git/hosts/delete":
+                    payload = self.state.delete_git_host(body.get("host"))
+                else:
+                    result = self.state.clone_workspace_git(body.get("url"), body.get("destination"))
+                    payload = {"ok": True, **result}
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "message": "Invalid JSON body"}, status=400)
+                return
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            except (OSError, subprocess.SubprocessError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=409)
+                return
+            self._send_json(payload)
             return
         if self.path == "/api/jobs" or self.path.startswith("/api/jobs/"):
             self._jobs_post()

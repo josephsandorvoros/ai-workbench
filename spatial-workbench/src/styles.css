@@ -3029,8 +3029,15 @@ h3 {
 .project-git-setup { border-top: 1px solid var(--color-border); display: grid; gap: var(--space-sm); min-width: 0; padding-top: var(--space-sm); }
 .project-git-setup form { display: grid; gap: var(--space-xs); }
 .project-git-setup label { color: var(--color-text-secondary); display: grid; font-size: var(--font-size-xs); gap: var(--space-3xs); }
-.project-git-setup input:not([type="checkbox"]) { background: var(--terminal-bg); border: 1px solid var(--color-border-strong); border-radius: var(--border-radius-sm); color: var(--color-text-primary); font: inherit; min-width: 0; padding: var(--space-xs) var(--space-sm); }
+.project-git-setup input:not([type="checkbox"]),
+.project-git-setup select,
+.project-git-setup textarea { background: var(--terminal-bg); border: 1px solid var(--color-border-strong); border-radius: var(--border-radius-sm); color: var(--color-text-primary); font: inherit; min-width: 0; padding: var(--space-xs) var(--space-sm); }
 .project-git-actions { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
+.project-git-host { border-top: 1px solid var(--color-border); display: grid; gap: var(--space-xs); min-width: 0; padding-top: var(--space-xs); }
+.project-git-host > span { color: var(--color-text-muted); font-size: var(--font-size-xs); overflow-wrap: anywhere; }
+.project-git-setup details { display: grid; gap: var(--space-xs); }
+.project-git-setup details > summary { color: var(--color-text-secondary); cursor: pointer; font-size: var(--font-size-xs); }
+.project-git-setup details > .muted { font-size: var(--font-size-xs); margin: 0; }
 .project-git-preview { background: var(--terminal-bg); border: 1px solid var(--color-border); border-radius: var(--border-radius-sm); display: grid; gap: var(--space-xs); min-width: 0; padding: var(--space-sm); }
 .project-git-preview p { color: var(--color-text-muted); font-size: var(--font-size-xs); margin: 0; overflow-wrap: anywhere; }
 .project-git-preview .project-git-warning { color: var(--color-status-warning); }
@@ -3985,6 +3992,12 @@ h3 {
 .jobs-project-options summary { color: var(--color-text-secondary); cursor: pointer; font-size: var(--font-size-sm); }
 .jobs-attempts { color: var(--color-text-muted); display: grid; font-size: var(--font-size-xs); gap: var(--space-3xs); overflow-wrap: anywhere; }
 .jobs-project-actions { align-items: center; display: flex; flex-wrap: wrap; gap: var(--space-sm); }
+.jobs-publish-form { border-top: 1px solid var(--color-border); display: grid; gap: var(--space-xs); margin-top: var(--space-xs); padding-top: var(--space-sm); }
+.jobs-publish-form label { color: var(--color-text-secondary); display: grid; font-size: var(--font-size-xs); gap: var(--space-3xs); }
+.jobs-publish-form input,
+.jobs-publish-form textarea { background: var(--terminal-bg); border: 1px solid var(--color-border-strong); border-radius: var(--border-radius-sm); color: var(--color-text-primary); font: inherit; min-width: 0; padding: var(--space-xs) var(--space-sm); }
+.jobs-publish-form textarea { resize: vertical; }
+.jobs-publish-form p { margin: 0; }
 .jobs-project-diff { background: var(--terminal-bg); border: 1px solid var(--color-border); border-radius: var(--border-radius-sm); display: grid; font-size: var(--font-size-xs); gap: var(--space-xs); overflow-wrap: anywhere; padding: var(--space-sm); }
 .jobs-project-diff ul { display: grid; gap: var(--space-3xs); margin: 0; padding-left: var(--space-md); }
 .jobs-project-diff span { color: var(--color-text-muted); }

@@ -16,8 +16,9 @@ For a project job, select a Git repository inside the workspace and its local ba
 2. Inspect the worker's project changes, committed patch, and any uncommitted changes.
 3. Review and test the result as appropriate for the project.
 4. Choose **Merge to base** only when you want the local merge and the base repository is clean and checked out on the configured branch.
+5. Choose **Push & create PR/MR** when you want the worker branch pushed to the configured HTTPS remote and a provider review request opened. Confirm the action; it does not merge the request.
 
-Merging is a real repository mutation, not a preview. Pull-request creation and remote push are not part of this workflow.
+Merging and publishing are real remote/local repository mutations, not previews. Publishing requires a saved host token with write access to the repository and a completed worker with no uncommitted changes. It pushes directly to `origin`; automatic fork creation is not supported. A pushed branch is not force-updated; if request creation fails, retrying checks for an existing request before creating another.
 
 ## Attempts and cleanup
 

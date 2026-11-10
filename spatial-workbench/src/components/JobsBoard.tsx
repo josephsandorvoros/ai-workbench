@@ -8,7 +8,7 @@ import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
 import { saveOpenCodeSettings } from "./OpenCodeSettings";
 
-type WorkerAttempt = { attempt: number; status: string; started_at?: number; finished_at?: number; error?: string; project_branch?: string; project_merged_at?: number | null; input_tokens?: number | null; output_tokens?: number | null; cost?: number | null; usage_available?: number };
+type WorkerAttempt = { attempt: number; status: string; started_at?: number; finished_at?: number; error?: string; project_branch?: string; project_merged_at?: number | null; project_pushed_commit?: string | null; project_review_url?: string | null; project_review_provider?: string | null; project_publish_state?: string | null; input_tokens?: number | null; output_tokens?: number | null; cost?: number | null; usage_available?: number };
 type Subtask = { idx: number; title: string; status: string; runtime_state?: string | null; result?: string; error?: string; depends_on?: number[]; wave?: number; attempts?: WorkerAttempt[] };
 type Job = {
   id: string; title: string; description: string; stage: string; detail: string; archived: number;
@@ -25,6 +25,7 @@ type CommsEntry = { ts: number; round: number; question?: string; answer?: strin
 type CommsThread = { idx: number; title: string; status: string; rounds: number; pending: string | null; entries: CommsEntry[] };
 type WorkerProfileDraft = Omit<WorkerProfile, "created_at" | "updated_at" | "id"> & { id?: string };
 type ProjectChanges = { branch: string; base_branch: string; files: string[]; uncommitted: string[]; diff: string; diff_truncated: boolean; working_diff: string; working_diff_truncated: boolean; merged_at: number | null; worker_status: string };
+type PublishDraft = { idx: number; title: string; body: string };
 
 const FINISHED = ["done", "failed", "stopped"];
 // Mirrors MOVE_TARGETS in jobs_engine.py: where a job may be moved from each stage.
@@ -93,6 +94,7 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
   const [projectPath, setProjectPath] = useState("");
   const [baseBranch, setBaseBranch] = useState("");
   const [projectChanges, setProjectChanges] = useState<Record<number, ProjectChanges>>({});
+  const [publishDraft, setPublishDraft] = useState<PublishDraft | null>(null);
   const [tokenBudget, setTokenBudget] = useState("");
   const [costBudget, setCostBudget] = useState("");
   const [executionRuntime, setExecutionRuntime] = useState<"docker" | "herdr" | "">("");
@@ -204,6 +206,7 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
   }, [active, selectedId]);
 
   function openJob(job: Job) {
+    setPublishDraft(null);
     setSelectedId(job.id);
     setSelected(job);
     setAnswers(job.questions?.map((_, index) => job.answers?.[index] || "") || []);
@@ -452,7 +455,25 @@ export function JobsBoard({ active = true, onOpenFiles }: { active?: boolean; on
             {selected.stage === "done" && subtask.status === "done" && !subtask.attempts[subtask.attempts.length - 1].project_merged_at && <button className="btn primary small" type="button" disabled={busy} onClick={() => {
               if (window.confirm(`Merge ${subtask.attempts?.[subtask.attempts.length - 1].project_branch} into ${selected.base_branch}?`)) void perform(`/${selected.id}/subtasks/${subtask.idx}/merge`);
             }}>Merge to base</button>}
+            {selected.stage === "done" && subtask.status === "done" && subtask.attempts[subtask.attempts.length - 1].project_review_url
+              ? <a className="btn secondary small" href={subtask.attempts[subtask.attempts.length - 1].project_review_url!} target="_blank" rel="noreferrer">Open {subtask.attempts[subtask.attempts.length - 1].project_review_provider === "gitlab" ? "merge request" : "pull request"}</a>
+              : selected.stage === "done" && subtask.status === "done" && <button className="btn secondary small" type="button" disabled={busy} onClick={() => setPublishDraft({ idx: subtask.idx, title: subtask.title, body: "" })}>{subtask.attempts[subtask.attempts.length - 1].project_pushed_commit ? "Retry PR/MR" : "Push & create PR/MR"}</button>}
           </div>}
+          {publishDraft?.idx === subtask.idx && selected.project_path && <form className="jobs-publish-form" onSubmit={(event) => {
+            event.preventDefault();
+            const attempt = subtask.attempts?.[subtask.attempts.length - 1];
+            if (!attempt?.project_branch || !selected.base_branch) return;
+            if (!window.confirm(`Push ${attempt.project_branch} to the configured remote and create a review request targeting ${selected.base_branch}?`)) return;
+            void perform(`/${selected.id}/subtasks/${subtask.idx}/publish`, {
+              confirm: true, title: publishDraft.title, body: publishDraft.body,
+            });
+            setPublishDraft(null);
+          }}>
+            <label>Review title<input value={publishDraft.title} maxLength={255} required onChange={(event) => setPublishDraft({ ...publishDraft, title: event.target.value })} /></label>
+            <label>Description<textarea rows={3} maxLength={65536} value={publishDraft.body} onChange={(event) => setPublishDraft({ ...publishDraft, body: event.target.value })} /></label>
+            <p className="jobs-text">This pushes the worker branch and opens a pull/merge request. It does not merge the request.</p>
+            <div className="jobs-project-actions"><button className="btn primary small" type="submit" disabled={busy || !publishDraft.title.trim()}>Push and create</button><button className="btn secondary small" type="button" disabled={busy} onClick={() => setPublishDraft(null)}>Cancel</button></div>
+          </form>}
           {projectChanges[subtask.idx] && <div className="jobs-project-diff"><strong>{projectChanges[subtask.idx].branch} → {projectChanges[subtask.idx].base_branch}</strong>
             {projectChanges[subtask.idx].files.length ? <ul>{projectChanges[subtask.idx].files.map((file) => <li key={file}>{file}</li>)}</ul> : <span>No committed changes</span>}
             {projectChanges[subtask.idx].diff && <><h5>Committed patch</h5><pre className="jobs-project-patch">{projectChanges[subtask.idx].diff}</pre>{projectChanges[subtask.idx].diff_truncated && <span>Committed patch truncated at 100 KB.</span>}</>}

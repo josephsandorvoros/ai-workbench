@@ -516,6 +516,24 @@ class JobEngineTests(unittest.TestCase):
         self._git(repo, "commit", "-m", "initial project")
         return repo
 
+    def _completed_project_job(self, engine):
+        repo = self._project_repo(engine)
+        self._git(repo, "remote", "add", "origin", "https://github.com/acme/sample.git")
+        job = engine.create("Publish sample", "Add a project note", project_path=str(repo), base_branch="main")
+        self.settle(engine)
+        engine.approve(job["id"])
+        self.settle(engine)
+        worktree = engine.job_dir(job["id"]) / "subtask-1" / "repo-attempt-1"
+        (worktree / "note.md").write_text("Project change\n", encoding="utf-8")
+        self._git(worktree, "add", "note.md")
+        self._git(worktree, "commit", "-m", "add project note")
+        self.docker.finish(self._running_cid(), text="completed project change")
+        self.settle(engine)
+        engine.git_credentials = lambda host: {
+            "host": host, "provider": "github", "username": "x-access-token", "token": "test-secret",
+        }
+        return job, repo
+
     def settle(self, engine, rounds=6):
         for _ in range(rounds):
             engine.tick()
@@ -853,6 +871,79 @@ class JobEngineTests(unittest.TestCase):
             engine.merge_project_worker(job["id"], 0)
         engine.delete(job["id"])
         self.assertFalse(worktree.exists())
+
+    def test_project_worker_publish_is_explicit_and_idempotent(self):
+        engine = self.engine([plan_reply(1), "summary"])
+        job, _ = self._completed_project_job(engine)
+        with patch.object(jobs_engine.git_remote, "push_branch") as push, patch.object(
+            jobs_engine.git_remote, "create_review_request",
+            return_value={"url": "https://github.com/acme/sample/pull/12", "provider": "github", "number": 12, "title": "Changes"},
+        ) as create_review:
+            result = engine.publish_project_worker(job["id"], 0, "Changes", "Review details")
+            again = engine.publish_project_worker(job["id"], 0, "Changes", "Review details")
+        self.assertEqual(result["url"], "https://github.com/acme/sample/pull/12")
+        self.assertTrue(again["already_exists"])
+        self.assertEqual(push.call_count, 1)
+        self.assertEqual(create_review.call_count, 1)
+        saved = engine.get_job(job["id"])["subtasks"][0]["attempts"][0]
+        self.assertEqual(saved["project_review_url"], result["url"])
+        self.assertEqual(saved["project_publish_state"], "published")
+        self.assertNotIn("test-secret", json.dumps(engine.get_job(job["id"])))
+
+    def test_project_worker_publish_retries_review_after_branch_push(self):
+        engine = self.engine([plan_reply(1), "summary"])
+        job, _ = self._completed_project_job(engine)
+        with patch.object(jobs_engine.git_remote, "push_branch") as push, patch.object(
+            jobs_engine.git_remote, "create_review_request",
+            side_effect=[jobs_engine.git_remote.GitRemoteError("Git host unavailable"),
+                         {"url": "https://github.com/acme/sample/pull/13", "provider": "github", "number": 13, "title": "Changes"}],
+        ) as create_review:
+            with self.assertRaisesRegex(ValueError, "Git host unavailable"):
+                engine.publish_project_worker(job["id"], 0, "Changes")
+            after_failure = engine.get_job(job["id"])["subtasks"][0]["attempts"][0]
+            self.assertEqual(after_failure["project_publish_state"], "pushed")
+            result = engine.publish_project_worker(job["id"], 0, "Changes")
+        self.assertEqual(result["url"], "https://github.com/acme/sample/pull/13")
+        self.assertEqual(push.call_count, 1)
+        self.assertEqual(create_review.call_count, 2)
+
+    def test_job_mutations_are_blocked_while_worker_branch_is_publishing(self):
+        engine = self.engine([])
+        job = engine.create("Publish lock", "description")
+        engine._publish_busy.add((job["id"], 0))
+        try:
+            for operation in (
+                lambda: engine.move(job["id"], "inbox"),
+                lambda: engine.retry(job["id"]),
+                lambda: engine.retry_subtask(job["id"], 0),
+                lambda: engine.archive(job["id"]),
+                lambda: engine.delete(job["id"]),
+            ):
+                with self.subTest(operation=operation), self.assertRaisesRegex(ValueError, "publish operation"):
+                    operation()
+        finally:
+            engine._publish_busy.discard((job["id"], 0))
+
+    def test_existing_worker_attempts_gain_publish_columns_without_losing_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = Path(root) / "jobs.db"
+            with sqlite3.connect(db_path) as db:
+                db.execute("""CREATE TABLE worker_attempts (
+                    job_id TEXT NOT NULL, idx INTEGER NOT NULL, attempt INTEGER NOT NULL, title TEXT NOT NULL,
+                    status TEXT NOT NULL, container TEXT, started_at REAL, finished_at REAL,
+                    exit_code INTEGER, error TEXT, log_path TEXT, profile_snapshot TEXT,
+                    project_branch TEXT, project_worktree TEXT, project_merged_at REAL,
+                    input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, cost REAL DEFAULT 0,
+                    PRIMARY KEY (job_id, idx, attempt))""")
+                db.execute("INSERT INTO worker_attempts (job_id, idx, attempt, title, status, project_branch) "
+                           "VALUES ('old-job', 0, 1, 'Old worker', 'done', 'workbench/old')")
+            JobEngine(db_path, Path(root) / "workspace", lambda prompt: "")
+            with sqlite3.connect(db_path) as db:
+                columns = {row[1] for row in db.execute("PRAGMA table_info(worker_attempts)")}
+                row = db.execute("SELECT title, project_branch FROM worker_attempts WHERE job_id='old-job'").fetchone()
+            self.assertTrue({"project_pushed_at", "project_pushed_commit", "project_review_url",
+                             "project_review_provider", "project_publish_state", "project_publish_started_at"}.issubset(columns))
+            self.assertEqual(row, ("Old worker", "workbench/old"))
 
     def test_project_path_must_be_inside_workspace_and_git(self):
         engine = self.engine([])

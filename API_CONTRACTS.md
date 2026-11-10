@@ -54,6 +54,9 @@ This document is the active contract reference for the AI Workbench companion AP
 | `/api/workspace/status` | GET | Scoped file metadata check | Browser polling watcher and conflict detection |
 | `/api/workspace/download` | GET | Scoped file/folder download (folders zipped) | Browser download buttons in the project explorer |
 | `/api/workspace/write` | POST | Scoped text/code file write with conflict checks | Controlled Monaco saves and future guarded agent edits |
+| `/api/workspace/git/clone` | POST | Clone an HTTPS Git repository into a new workspace `projects/` path | Projects clone panel |
+| `/api/git/hosts` | GET/POST | List sanitized Git hosts or save provider metadata and a write-only token | Projects Git host credentials |
+| `/api/git/hosts/delete` | POST | Remove a Git host and its stored token | Projects Git host credentials |
 | `/api/jobs` | GET/POST | Job board list and create | Jobs board UI |
 | `/api/jobs/{id}` | GET | Single job with subtasks and events | Jobs board UI |
 | `/api/jobs/{id}/{action}` | POST | Job actions: answer, approve, move, stop, retry, archive | Jobs board UI |
@@ -62,6 +65,7 @@ This document is the active contract reference for the AI Workbench companion AP
 | `/api/jobs/{id}/subtasks/{n}/retry` | POST | Retry a failed/timed-out worker, requeue dependency-cascade descendants, and retain attempt history | Jobs drawer retry action |
 | `/api/jobs/{id}/subtasks/{n}/project` | GET | Inspect changed files, bounded committed/working patches, and worktree status for the latest project attempt | Jobs drawer project review |
 | `/api/jobs/{id}/subtasks/{n}/merge` | POST | Explicitly merge a clean worker branch into its configured local base branch | Jobs drawer project review |
+| `/api/jobs/{id}/subtasks/{n}/publish` | POST | After explicit confirmation, push a completed worker branch and create or reuse a provider pull/merge request | Jobs drawer project review |
 | `/api/jobs/{id}/comms` | GET | Worker clarification threads | Jobs drawer comms view |
 | `/api/worker-profiles` | GET/POST | List or save reusable worker profiles | Jobs board profile manager |
 | `/api/opencode-settings` | GET/POST | Read effective main/worker defaults; persist endpoint/model choices and write-only keys | Agent Workbench settings and Jobs profile keys |
@@ -323,8 +327,13 @@ Job `stage` is one of `inbox`, `review`, `needs_input`, `planned`, `running`, `r
 - `stop`, `retry`, `archive` — no body. `retry` is only valid on finished jobs; `archive` only when not active.
 - `subtasks/{n}/retry` — retry only a failed or timed-out worker in a finished job; prior attempts are retained.
 - `subtasks/{n}/merge` — no body; only completed project workers can merge, and the base repository must be clean and checked out on the configured base branch. This performs a local merge and does not push or create a PR.
+- `subtasks/{n}/publish` — body `{confirm: true, title, body?}`; only completed project workers can publish. Requires an HTTPS `origin`, write access to that repository, and a configured GitHub, GitLab, or Forgejo token for that host. It pushes only the worker branch (no force) and creates or reuses a pull/merge request; it never merges the request. Fork creation is not supported. A pushed branch is retained if request creation fails so the operation can be safely retried.
 
-`GET /api/jobs/{id}/subtasks/{n}/log` returns `ok` and `log` (raw OpenCode JSON lines, last 400 lines). The `/stream` route emits JSON `data:` events with `log`, `replace`, and `status`. `GET /project` returns changed files, uncommitted files, branch, and merge state. `GET /api/jobs/{id}/comms` returns `ok`, `job_id`, and `threads` (per-subtask clarification history with `pending`, `rounds`, and `entries`).
+`GET /api/jobs/{id}/subtasks/{n}/log` returns `ok` and `log` (raw OpenCode JSON lines, last 400 lines). The `/stream` route emits JSON `data:` events with `log`, `replace`, and `status`. `GET /project` returns changed files, uncommitted files, branch, and merge state. Attempt records include remote push/review-request status and an HTTPS review URL when present. `GET /api/jobs/{id}/comms` returns `ok`, `job_id`, and `threads` (per-subtask clarification history with `pending`, `rounds`, and `entries`).
+
+`GET /api/git/hosts` returns only host, provider, optional username, and a `token_set` boolean. `POST /api/git/hosts` accepts `host`, `provider` (`github`, `gitlab`, or `forgejo`), optional `username`, optional `token`, and `clear_token`; tokens are never returned. `POST /api/git/hosts/delete` accepts a host and removes its metadata and token. Tokens are stored in the companion settings file with mode `0600`; they are not encrypted at rest.
+
+`POST /api/workspace/git/clone` accepts `{url, destination}`. URLs must use HTTPS and cannot embed credentials. Destinations must be new paths beneath `projects/`. Unconfigured hosts must resolve to globally routable addresses; explicitly configured Git hosts may point to self-hosted/private addresses. Cloning a public repository does not require a token.
 
 Worker profiles are independent from chat/provider profiles. `GET /api/worker-profiles` lists them; `POST` creates or updates a profile with `id` (optional), `name`, `instructions`, `runtime` (`opencode`), `model`, `skills` (up to five installed Hermes skill paths), and `permission_preset` (`guarded` or `trusted`). The deployment-wide `JOB_AUTO_APPROVE` setting is always an upper bound on worker permissions. Deleting a profile does not change existing job or attempt snapshots.
 

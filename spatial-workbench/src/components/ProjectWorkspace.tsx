@@ -1,7 +1,7 @@
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { updateAgentProvider, useAgentProvider } from "../agent/agentStore";
-import { compatClient, type AppPreviewSession, type CapabilityState, type WorkspaceEntry, type WorkspaceGitPreview } from "../api/compatClient";
+import { compatClient, type AppPreviewSession, type CapabilityState, type GitHostConnection, type GitProvider, type WorkspaceEntry, type WorkspaceGitPreview } from "../api/compatClient";
 import { formatWorkspaceJson, workspaceFileKind, WORKSPACE_PREVIEW_MAX_BYTES } from "../agent/workspacePreview";
 import { DEFAULT_HTML_ARTIFACT } from "../agent/htmlArtifact";
 import { prepareAttachment } from "../agent/attachments";
@@ -87,6 +87,18 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
   const [creatingFileBusy, setCreatingFileBusy] = useState(false);
   const [newFileError, setNewFileError] = useState("");
   const [gitSetupOpen, setGitSetupOpen] = useState(false);
+  const [gitCloneOpen, setGitCloneOpen] = useState(false);
+  const [gitCloneUrl, setGitCloneUrl] = useState("");
+  const [gitClonePath, setGitClonePath] = useState("projects/new-repository");
+  const [gitCloneBusy, setGitCloneBusy] = useState(false);
+  const [gitCloneMessage, setGitCloneMessage] = useState("");
+  const [gitHosts, setGitHosts] = useState<GitHostConnection[]>([]);
+  const [gitHostName, setGitHostName] = useState("");
+  const [gitHostProvider, setGitHostProvider] = useState<GitProvider>("github");
+  const [gitHostUsername, setGitHostUsername] = useState("");
+  const [gitHostToken, setGitHostToken] = useState("");
+  const [gitHostBusy, setGitHostBusy] = useState(false);
+  const [gitHostMessage, setGitHostMessage] = useState("");
   const [gitSetupPath, setGitSetupPath] = useState("");
   const [gitBranch, setGitBranch] = useState("main");
   const [gitPreview, setGitPreview] = useState<WorkspaceGitPreview | null>(null);
@@ -423,6 +435,81 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
       setGitConfirmFiles(false);
     } finally {
       setGitBusy(false);
+    }
+  }
+
+  async function openGitClonePanel() {
+    const opening = !gitCloneOpen;
+    setGitCloneOpen(opening);
+    if (!opening) return;
+    setGitCloneMessage("");
+    try {
+      const result = await compatClient.getGitHosts();
+      setGitHosts(result.hosts);
+    } catch (error) {
+      setGitHostMessage(`Could not load Git hosts: ${error}`);
+    }
+  }
+
+  async function cloneGitRepository(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setGitCloneBusy(true);
+    setGitCloneMessage("");
+    try {
+      const result = await compatClient.cloneWorkspaceGit(gitCloneUrl.trim(), gitClonePath.trim());
+      setGitCloneMessage(`Cloned ${result.path} on ${result.branch}.`);
+      setCurrentPath("projects");
+      await loadTree("projects");
+    } catch (error) {
+      setGitCloneMessage(`Clone failed: ${error}`);
+    } finally {
+      setGitCloneBusy(false);
+    }
+  }
+
+  async function saveGitHost(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setGitHostBusy(true);
+    setGitHostMessage("");
+    try {
+      const result = await compatClient.saveGitHost(gitHostName.trim(), gitHostProvider, gitHostUsername.trim(), gitHostToken);
+      setGitHosts(result.hosts);
+      setGitHostName("");
+      setGitHostUsername("");
+      setGitHostToken("");
+      setGitHostMessage("Git host saved. The token stays on the server.");
+    } catch (error) {
+      setGitHostMessage(`Could not save Git host: ${error}`);
+    } finally {
+      setGitHostBusy(false);
+    }
+  }
+
+  async function clearGitHostToken(host: GitHostConnection) {
+    if (!window.confirm(`Clear the saved access token for ${host.host}?`)) return;
+    setGitHostBusy(true);
+    try {
+      const result = await compatClient.clearGitHostToken(host.host, host.provider, host.username);
+      setGitHosts(result.hosts);
+      setGitHostMessage(`Access token cleared for ${host.host}.`);
+    } catch (error) {
+      setGitHostMessage(`Could not clear Git token: ${error}`);
+    } finally {
+      setGitHostBusy(false);
+    }
+  }
+
+  async function deleteGitHost(host: GitHostConnection) {
+    if (!window.confirm(`Remove ${host.host} and its saved access token?`)) return;
+    setGitHostBusy(true);
+    try {
+      await compatClient.deleteGitHost(host.host);
+      setGitHosts((current) => current.filter((entry) => entry.host !== host.host));
+      setGitHostMessage(`Removed ${host.host}.`);
+    } catch (error) {
+      setGitHostMessage(`Could not remove Git host: ${error}`);
+    } finally {
+      setGitHostBusy(false);
     }
   }
 
@@ -870,6 +957,7 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
               if (file) void importFile(file);
               event.currentTarget.value = "";
             }} />
+            <button className="btn secondary small" type="button" onClick={() => void openGitClonePanel()}>Clone Git repo</button>
             <button className="btn secondary small" type="button" onClick={() => {
               setGitSetupOpen(!gitSetupOpen);
               setGitSetupPath(currentPath);
@@ -913,6 +1001,33 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
               <button className="btn primary small" type="button" onClick={() => void initializeGitRepository()} disabled={gitBusy || (gitPreview.file_count > 0 && !gitConfirmFiles)}>{gitBusy ? "Initializing..." : "Initialize and commit"}</button>
             </div>}
             {gitSetupMessage && <p className={gitSetupMessage.startsWith("Git initialization failed") || gitSetupMessage.startsWith("Preview failed") ? "jobs-error" : "project-git-success"} role="status">{gitSetupMessage}</p>}
+          </div>}
+          {gitCloneOpen && <div className="project-git-setup">
+            <form onSubmit={(event) => void cloneGitRepository(event)}>
+              <label>HTTPS repository URL<input type="url" value={gitCloneUrl} onChange={(event) => setGitCloneUrl(event.target.value)} placeholder="https://github.com/owner/repository.git" required /></label>
+              <label>Workspace folder<input value={gitClonePath} onChange={(event) => setGitClonePath(event.target.value)} placeholder="projects/my-repository" required /></label>
+              <div className="project-git-actions"><button className="btn primary small" type="submit" disabled={gitCloneBusy}>{gitCloneBusy ? "Cloning..." : "Clone repository"}</button><button className="btn secondary small" type="button" onClick={() => setGitCloneOpen(false)}>Close</button></div>
+            </form>
+            {gitCloneMessage && <p className={gitCloneMessage.startsWith("Clone failed") ? "jobs-error" : "project-git-success"} role="status">{gitCloneMessage}</p>}
+            <details>
+              <summary>Git host credentials</summary>
+              <p className="muted">Public repositories need no token. Saved tokens are used by the server for clone, push, and review requests; they are never shown again.</p>
+              <form onSubmit={(event) => void saveGitHost(event)}>
+                <label>Host<input value={gitHostName} onChange={(event) => setGitHostName(event.target.value)} placeholder="github.com or forgejo.example" required /></label>
+                <label>Provider<select value={gitHostProvider} onChange={(event) => setGitHostProvider(event.target.value as GitProvider)}><option value="github">GitHub</option><option value="gitlab">GitLab</option><option value="forgejo">Forgejo</option></select></label>
+                {gitHostProvider === "forgejo" && <label>Username<input value={gitHostUsername} onChange={(event) => setGitHostUsername(event.target.value)} required /></label>}
+                <label>Access token<input type="password" autoComplete="new-password" value={gitHostToken} onChange={(event) => setGitHostToken(event.target.value)} placeholder="Enter a token; leave blank to keep the saved token" /></label>
+                <button className="btn primary small" type="submit" disabled={gitHostBusy || !gitHostName.trim()}>{gitHostBusy ? "Saving..." : "Save Git host"}</button>
+              </form>
+              {gitHosts.map((host) => <div className="project-git-host" key={host.host}>
+                <span><strong>{host.host}</strong> · {host.provider} · {host.token_set ? "token saved" : "no token"}</span>
+                <div className="project-git-actions">
+                  {host.token_set && <button className="btn secondary small" type="button" disabled={gitHostBusy} onClick={() => void clearGitHostToken(host)}>Clear token</button>}
+                  <button className="btn danger small" type="button" disabled={gitHostBusy} onClick={() => void deleteGitHost(host)}>Remove</button>
+                </div>
+              </div>)}
+              {gitHostMessage && <p className={gitHostMessage.startsWith("Could not") ? "jobs-error" : "project-git-success"} role="status">{gitHostMessage}</p>}
+            </details>
           </div>}
           <div ref={fileTree} className="project-tree" role="tree" aria-label="Files and folders">
             {entries.length === 0 ? (

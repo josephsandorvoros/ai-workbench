@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from herdr_runtime import HerdrRuntime
+import git_remote
 
 STAGES = ("inbox", "review", "needs_input", "planned", "running", "replanning", "collating", "done", "failed", "stopped")
 ACTIVE_STAGES = ("review", "running", "replanning", "collating")
@@ -309,6 +310,8 @@ class JobEngine:
         self.settings = settings or self.settings_from_env()
         self.worker_config = worker_config
         self.lock = threading.RLock()
+        self.git_credentials = None
+        self._publish_busy = set()
         self._busy = set()  # job ids with a Hermes call in flight
         self._comms_busy = set()  # (job_id, idx) with a comms answer in flight
         self._stop = threading.Event()
@@ -340,6 +343,9 @@ class JobEngine:
                     status TEXT NOT NULL, container TEXT, started_at REAL, finished_at REAL,
                     exit_code INTEGER, error TEXT, log_path TEXT, profile_snapshot TEXT,
                     project_branch TEXT, project_worktree TEXT, project_merged_at REAL,
+                    project_pushed_at REAL, project_pushed_commit TEXT, project_review_url TEXT,
+                    project_review_provider TEXT, project_publish_state TEXT,
+                    project_publish_started_at REAL,
                     input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, cost REAL DEFAULT 0,
                     PRIMARY KEY (job_id, idx, attempt));
                 """
@@ -372,10 +378,14 @@ class JobEngine:
             attempt_columns = {row[1] for row in db.execute("PRAGMA table_info(worker_attempts)")}
             for column, definition in (("project_branch", "TEXT"), ("project_worktree", "TEXT"),
                                        ("project_merged_at", "REAL"), ("input_tokens", "INTEGER DEFAULT 0"),
+                                       ("project_pushed_at", "REAL"), ("project_pushed_commit", "TEXT"),
+                                       ("project_review_url", "TEXT"), ("project_review_provider", "TEXT"),
+                                       ("project_publish_state", "TEXT"), ("project_publish_started_at", "REAL"),
                                        ("output_tokens", "INTEGER DEFAULT 0"), ("cost", "REAL DEFAULT 0"),
                                        ("usage_available", "INTEGER NOT NULL DEFAULT 1")):
                 if column not in attempt_columns:
                     db.execute(f"ALTER TABLE worker_attempts ADD COLUMN {column} {definition}")
+            db.execute("UPDATE worker_attempts SET project_publish_state=CASE WHEN project_pushed_commit IS NULL THEN NULL ELSE 'pushed' END, project_publish_started_at=NULL WHERE project_publish_state='publishing'")
             db.execute("UPDATE worker_attempts SET usage_available=0, input_tokens=NULL, output_tokens=NULL, cost=NULL "
                        "WHERE job_id IN (SELECT id FROM jobs WHERE execution_runtime='herdr') AND usage_available=1")
 
@@ -822,6 +832,7 @@ class JobEngine:
 
     def retry(self, job_id):
         with self.lock, self._db() as db:
+            self._assert_not_publishing(job_id)
             job = db.execute("SELECT stage FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not job or job["stage"] not in ("failed", "stopped", "done"):
                 raise ValueError("Only finished jobs can be retried")
@@ -831,6 +842,7 @@ class JobEngine:
 
     def retry_subtask(self, job_id, idx):
         with self.lock, self._db() as db:
+            self._assert_not_publishing(job_id)
             job = db.execute("SELECT stage FROM jobs WHERE id=? AND archived=0", (job_id,)).fetchone()
             sub = db.execute("SELECT title, status FROM subtasks WHERE job_id=? AND idx=?", (job_id, idx)).fetchone()
             if not job or not sub:
@@ -944,6 +956,97 @@ class JobEngine:
         return {"branch": attempt["project_branch"], "base_branch": job["base_branch"], "merged_at": merged_at,
                 "output": merged.stdout.strip()}
 
+    def publish_project_worker(self, job_id, idx, title, body=""):
+        key = (job_id, idx)
+        with self.lock:
+            if key in self._publish_busy:
+                raise ValueError("This worker branch is already being published")
+            self._publish_busy.add(key)
+        claimed = False
+        pushed_commit = None
+        try:
+            with self._db() as db:
+                job = db.execute("SELECT stage, project_path, base_branch FROM jobs WHERE id=? AND archived=0", (job_id,)).fetchone()
+                sub = db.execute("SELECT status FROM subtasks WHERE job_id=? AND idx=?", (job_id, idx)).fetchone()
+                attempt = db.execute("SELECT * FROM worker_attempts WHERE job_id=? AND idx=? AND project_branch IS NOT NULL ORDER BY attempt DESC LIMIT 1",
+                                     (job_id, idx)).fetchone()
+            if not job or not job["project_path"] or not sub or not attempt:
+                raise ValueError("Project-backed worker attempt not found")
+            if job["stage"] != "done" or sub["status"] != "done" or attempt["status"] != "done":
+                raise ValueError("Only completed workers in a completed job can be published")
+            if attempt["project_review_url"]:
+                return {"url": attempt["project_review_url"], "provider": attempt["project_review_provider"],
+                        "branch": attempt["project_branch"], "base_branch": job["base_branch"], "already_exists": True}
+
+            repo = Path(job["project_path"]).resolve()
+            if not repo.is_relative_to(self.workspace_root.resolve()):
+                raise ValueError("Project repository must stay inside the workspace")
+            worktree = Path(attempt["project_worktree"] or "").resolve()
+            if not worktree.is_relative_to(self.job_dir(job_id).resolve()) or not worktree.is_dir():
+                raise ValueError("Worker project worktree is unavailable")
+            dirty = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=normal"],
+                                   capture_output=True, text=True, timeout=10)
+            if dirty.returncode != 0 or dirty.stdout.strip():
+                raise ValueError("Commit or discard uncommitted worker changes before publishing")
+            commit = subprocess.run(["git", "-C", str(repo), "rev-parse", attempt["project_branch"]],
+                                    capture_output=True, text=True, timeout=10)
+            if commit.returncode != 0:
+                raise ValueError("Worker branch is no longer available")
+            commit = commit.stdout.strip()
+            previous_commit = attempt["project_pushed_commit"]
+            if previous_commit and previous_commit != commit:
+                raise ValueError("Worker branch changed after it was pushed; do not overwrite the remote branch")
+            pushed_commit = previous_commit
+            remote_result = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+                                           capture_output=True, text=True, timeout=10)
+            if remote_result.returncode != 0:
+                raise ValueError("Project repository needs an HTTPS origin remote before publishing")
+            remote_url = remote_result.stdout.strip()
+            remote = git_remote.parse_remote_url(remote_url)
+            credentials = self.git_credentials(remote.host) if self.git_credentials else None
+            if not credentials or not credentials.get("token"):
+                raise ValueError("Save an access token for this Git host before publishing")
+            provider = credentials.get("provider")
+            if provider not in git_remote.PROVIDERS:
+                raise ValueError("Choose GitHub, GitLab, or Forgejo for this Git host")
+
+            with self._db() as db:
+                db.execute("UPDATE worker_attempts SET project_publish_state='publishing', project_publish_started_at=? "
+                           "WHERE job_id=? AND idx=? AND attempt=?",
+                           (_now(), job_id, idx, attempt["attempt"]))
+            claimed = True
+
+            if not pushed_commit:
+                git_remote.push_branch(repo, remote_url, attempt["project_branch"], credentials)
+                pushed_commit = commit
+                with self._db() as db:
+                    db.execute("UPDATE worker_attempts SET project_pushed_at=?, project_pushed_commit=?, "
+                               "project_publish_state='pushed', project_publish_started_at=NULL "
+                               "WHERE job_id=? AND idx=? AND attempt=?",
+                               (_now(), commit, job_id, idx, attempt["attempt"]))
+            review = git_remote.create_review_request(
+                remote_url, provider, credentials["token"], attempt["project_branch"],
+                job["base_branch"], title, body,
+            )
+            with self._db() as db:
+                db.execute("UPDATE worker_attempts SET project_review_url=?, project_review_provider=?, "
+                           "project_publish_state='published', project_publish_started_at=NULL "
+                           "WHERE job_id=? AND idx=? AND attempt=?",
+                           (review["url"], review["provider"], job_id, idx, attempt["attempt"]))
+                self._event(db, job_id, "project", f"worker {idx + 1} published {attempt['project_branch']} as a {review['provider']} review request")
+            return {"url": review["url"], "provider": review["provider"], "branch": attempt["project_branch"],
+                    "base_branch": job["base_branch"], "already_exists": review.get("already_exists", False)}
+        except Exception:
+            if claimed:
+                with self._db() as db:
+                    db.execute("UPDATE worker_attempts SET project_publish_state=?, project_publish_started_at=NULL "
+                               "WHERE job_id=? AND idx=? AND attempt=? AND project_publish_state='publishing'",
+                               ("pushed" if pushed_commit else None, job_id, idx, attempt["attempt"]))
+            raise
+        finally:
+            with self.lock:
+                self._publish_busy.discard(key)
+
     def move(self, job_id, target, note=""):
         """Move a job to another stage so it can be clarified or re-run.
 
@@ -953,6 +1056,7 @@ class JobEngine:
         """
         note = (note or "").strip()[:500]
         with self.lock, self._db() as db:
+            self._assert_not_publishing(job_id)
             job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not job:
                 raise ValueError("Job not found")
@@ -1016,6 +1120,7 @@ class JobEngine:
 
     def archive(self, job_id):
         with self.lock, self._db() as db:
+            self._assert_not_publishing(job_id)
             job = db.execute("SELECT stage FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not job or job["stage"] in ACTIVE_STAGES:
                 raise ValueError("Stop the job before archiving it")
@@ -1026,6 +1131,7 @@ class JobEngine:
     def delete(self, job_id):
         """Permanently remove a finished job: its rows and its artifact folder."""
         with self.lock, self._db() as db:
+            self._assert_not_publishing(job_id)
             job = db.execute("SELECT stage FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not job:
                 raise ValueError("Job not found")
@@ -1042,6 +1148,10 @@ class JobEngine:
         if job_dir.is_symlink() or not job_dir.resolve().is_relative_to((self.workspace_root / "jobs").resolve()):
             return
         shutil.rmtree(job_dir, ignore_errors=True)
+
+    def _assert_not_publishing(self, job_id):
+        if any(publishing_job == job_id for publishing_job, _ in self._publish_busy):
+            raise ValueError("Wait for the Git publish operation to finish before changing this job")
 
     def _remove_project_worktrees(self, db, job_id):
         rows = db.execute("SELECT project_branch, project_worktree, project_merged_at FROM worker_attempts "
