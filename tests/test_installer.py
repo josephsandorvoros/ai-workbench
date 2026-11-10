@@ -20,6 +20,7 @@ class InstallerTests(unittest.TestCase):
         dockerfile = (SCRIPT.parent / "agent" / "Dockerfile").read_text()
         self.assertIn("RUN rm -f /etc/cont-init.d/02-reconcile-profiles", dockerfile)
         self.assertIn('CMD ["python3", "/opt/workbench/hermes_runtime.py", "supervise", "gateway"]', dockerfile)
+        self.assertIn("COPY git_remote.py /opt/workbench/git_remote.py", dockerfile)
 
     def test_managed_hermes_cli_path_is_preferred_and_profile_edit_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:

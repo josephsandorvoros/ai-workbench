@@ -36,6 +36,7 @@ RUN case "${TARGETARCH}" in \
 
 COPY --chmod=0755 dashboard_server.py /opt/workbench/dashboard_server.py
 COPY hermes_live.py /opt/workbench/hermes_live.py
+COPY git_remote.py /opt/workbench/git_remote.py
 COPY jobs_engine.py /opt/workbench/jobs_engine.py
 COPY herdr_runtime.py /opt/workbench/herdr_runtime.py
 COPY opencode_config.py /opt/workbench/opencode_config.py
