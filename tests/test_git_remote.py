@@ -200,11 +200,16 @@ class GitRemoteTests(unittest.TestCase):
                     [env["GIT_ASKPASS"], "Password for 'https://github.com/o/r.git':"],
                     capture_output=True, text=True, env=env,
                 )
+                github_token_prompt = subprocess.run(
+                    [env["GIT_ASKPASS"], "Password for 'https://x-access-token@github.com':"],
+                    capture_output=True, text=True, env=env,
+                )
                 blocked = subprocess.run(
                     [env["GIT_ASKPASS"], "Password for 'https://attacker.example/o/r.git':"],
                     capture_output=True, text=True, env=env,
                 )
         self.assertEqual(allowed.stdout.strip(), "secret")
+        self.assertEqual(github_token_prompt.stdout.strip(), "secret")
         self.assertEqual(blocked.returncode, 1)
         self.assertNotIn("secret", blocked.stdout)
 

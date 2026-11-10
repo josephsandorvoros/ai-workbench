@@ -236,7 +236,8 @@ def _git_environment(credentials=None):
             "import os, re, sys\n"
             "prompt = sys.argv[1] if len(sys.argv) > 1 else ''\n"
             "match = re.search(r\"https://([^/'\\\" ]+)\", prompt)\n"
-            "if not match or match.group(1).lower() != os.environ.get('GIT_HTTP_EXPECTED_HOST', '').lower(): sys.exit(1)\n"
+            "authority = match.group(1).rsplit('@', 1)[-1].rstrip(':') if match else ''\n"
+            "if not authority or authority.lower() != os.environ.get('GIT_HTTP_EXPECTED_HOST', '').lower(): sys.exit(1)\n"
             "if 'Username' in prompt: print(os.environ['GIT_HTTP_USERNAME'])\n"
             "elif 'Password' in prompt: print(os.environ['GIT_HTTP_TOKEN'])\n"
             "else: sys.exit(1)\n",
