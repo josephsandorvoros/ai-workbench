@@ -18,9 +18,13 @@ import bootstrap
 class InstallerTests(unittest.TestCase):
     def test_agent_image_has_one_managed_gateway_owner(self):
         dockerfile = (SCRIPT.parent / "agent" / "Dockerfile").read_text()
+        mcp_source = (SCRIPT.parent / "agent" / "workbench_mcp.py").read_text()
         self.assertIn("RUN rm -f /etc/cont-init.d/02-reconcile-profiles", dockerfile)
+        self.assertIn("openssh-client", dockerfile)
         self.assertIn('CMD ["python3", "/opt/workbench/hermes_runtime.py", "supervise", "gateway"]', dockerfile)
         self.assertIn("COPY git_remote.py /opt/workbench/git_remote.py", dockerfile)
+        for name in ("git_status", "git_commit", "git_pull_ff", "git_push"):
+            self.assertIn(f'"{name}"', mcp_source)
 
     def test_managed_hermes_cli_path_is_preferred_and_profile_edit_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -42,6 +46,12 @@ class InstallerTests(unittest.TestCase):
         self.assertLess(dockerfile.index("COPY --from=ghcr.io/astral-sh/uv:"), dockerfile.index("RUN uv --version"))
         self.assertIn("uv pip install --python /opt/hermes/.venv/bin/python PyYAML==6.0.3", dockerfile)
         self.assertIn('/opt/hermes/.venv/bin/python -c "import yaml"', dockerfile)
+
+    def test_hermes_mcp_exposes_confirmed_git_tools(self):
+        mcp_source = (SCRIPT.parent / "agent" / "workbench_mcp.py").read_text()
+        for name in ("git_status", "git_commit", "git_pull_ff", "git_push"):
+            self.assertIn(f'"{name}"', mcp_source)
+        self.assertIn('if args.get("confirm") is not True:', mcp_source)
 
     def test_dry_run_does_not_write_or_disclose_secret(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -12,6 +12,9 @@ ARG WORKBENCH_UPDATE_URL=https://api.github.com/repos/josephsandorvoros/ai-workb
 USER root
 
 RUN rm -f /etc/cont-init.d/02-reconcile-profiles
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v ssh && command -v ssh-keygen
 
 COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/licenses/ai-workbench/
 COPY --from=ghcr.io/astral-sh/uv:0.11.16 /uv /usr/local/bin/uv

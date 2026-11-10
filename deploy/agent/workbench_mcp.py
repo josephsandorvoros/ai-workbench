@@ -18,8 +18,9 @@ The AI Workbench UI has two agent paths:
     on this path, so the gateway agent cannot touch the workbench.
 
 This server closes that gap. It is spawned by the Hermes gateway as a stdio
-MCP child process and re-implements the exact same 20 tools the browser uses,
-talking to the companion API (dashboard_server.py) over HTTP. Because the
+MCP child process and exposes matching workspace tools, including Git status,
+commit, pull, and push operations, by talking to the companion API (dashboard_server.py)
+over HTTP. Because the
 gateway and the companion API run in the same container, the server reaches
 the API at http://127.0.0.1:8080.
 
@@ -244,6 +245,48 @@ def command_board(command: str, **payload) -> dict:
 # ---------------------------------------------------------------------------
 # Tool handlers — each returns (ok: bool, output: str)
 # ---------------------------------------------------------------------------
+
+
+def _git_status(args: dict):
+    path = to_workspace_relative_path(as_string(args.get("path")))
+    if not path:
+        return False, "Missing project repository path."
+    status = api_get(with_query("/api/workspace/git/status", {"path": path})).get("status") or {}
+    return True, json.dumps(status, ensure_ascii=False, indent=2)
+
+
+def _git_operation(action: str, args: dict):
+    path = to_workspace_relative_path(as_string(args.get("path")))
+    if not path:
+        return False, "Missing project repository path."
+    if args.get("confirm") is not True:
+        return False, "This Git operation needs explicit user confirmation."
+    body = {"action": action, "path": path, "confirm": True}
+    if action == "commit":
+        paths = args.get("paths")
+        if not isinstance(paths, list) or not all(isinstance(item, str) for item in paths):
+            return False, "git_commit needs a selected paths array from git_status."
+        body.update({
+            "paths": paths,
+            "message": as_string(args.get("message")),
+            "author_name": as_string(args.get("author_name")),
+            "author_email": as_string(args.get("author_email")),
+            "confirm_sensitive": args.get("confirm_sensitive") is True,
+        })
+    result = api_post("/api/workspace/git/operation", body).get("result") or {}
+    return True, json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _git_commit(args: dict):
+    return _git_operation("commit", args)
+
+
+def _git_pull_ff(args: dict):
+    return _git_operation("pull_ff", args)
+
+
+def _git_push(args: dict):
+    return _git_operation("push", args)
 
 
 def _read_code_file(args: dict):
@@ -570,6 +613,10 @@ def _stop_app_preview(args: dict):
 # ---------------------------------------------------------------------------
 
 HANDLERS = {
+    "git_status": _git_status,
+    "git_commit": _git_commit,
+    "git_pull_ff": _git_pull_ff,
+    "git_push": _git_push,
     "read_code_file": _read_code_file,
     "write_code_file": _write_code_file,
     "edit_code_file": _edit_code_file,
@@ -608,6 +655,39 @@ def _tool(name, description, properties, required=None, **extra):
 
 
 TOOLS = [
+    # --- Git tools ---
+    _tool(
+        "git_status",
+        "Read branch, upstream, ahead/behind counts, and changed-file status for a project under projects/. This is read-only.",
+        {"path": {"type": "string", "description": "Workspace-relative project repository path under projects/."}},
+        required=["path"],
+    ),
+    _tool(
+        "git_commit",
+        "Commit only selected changed files. Call only when the user explicitly asked to commit; do not include secret files. Requires confirm=true, a one-line message, and author identity.",
+        {
+            "path": {"type": "string"},
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "message": {"type": "string"},
+            "author_name": {"type": "string"},
+            "author_email": {"type": "string"},
+            "confirm_sensitive": {"type": "boolean", "description": "Explicitly acknowledge reviewed likely secret files."},
+            "confirm": {"type": "boolean", "description": "Must be true only after explicit user approval."},
+        },
+        required=["path", "paths", "message", "author_name", "author_email", "confirm_sensitive", "confirm"],
+    ),
+    _tool(
+        "git_pull_ff",
+        "Fetch and fast-forward from the origin upstream. Call only when the user explicitly asked to sync from the remote; refuses divergent histories. Requires confirm=true.",
+        {"path": {"type": "string"}, "confirm": {"type": "boolean"}},
+        required=["path", "confirm"],
+    ),
+    _tool(
+        "git_push",
+        "Push committed changes to origin without force. Call only when the user explicitly asked to push; never push as an assumed follow-up. Requires confirm=true.",
+        {"path": {"type": "string"}, "confirm": {"type": "boolean"}},
+        required=["path", "confirm"],
+    ),
     # --- File tools ---
     _tool(
         "read_code_file",

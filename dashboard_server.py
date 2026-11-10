@@ -1513,6 +1513,10 @@ class DashboardState:
     def _git_secret_name(host):
         return "git:" + hashlib.sha256(host.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _git_ssh_secret_name(host):
+        return "git-ssh:" + hashlib.sha256(host.encode("utf-8")).hexdigest()
+
     def get_git_hosts(self):
         with self.workbench_state_lock:
             data = self._read_settings()
@@ -1528,7 +1532,11 @@ class DashboardState:
                     continue
                 hosts.append({"host": host, "provider": provider,
                               "username": str(entry.get("username") or ""),
-                              "token_set": bool(secrets.get(self._git_secret_name(host)))})
+                              "auth_method": entry.get("auth_method") if entry.get("auth_method") in {"pat", "ssh"} else "pat",
+                              "token_set": bool(secrets.get(self._git_secret_name(host))),
+                              "ssh_key_set": bool(secrets.get(self._git_ssh_secret_name(host))),
+                              "ssh_public_key": str(entry.get("ssh_public_key") or ""),
+                              "known_hosts_set": bool(entry.get("known_hosts"))})
         return {"ok": True, "hosts": sorted(hosts, key=lambda item: item["host"])}
 
     def save_git_host(self, patch):
@@ -1536,27 +1544,64 @@ class DashboardState:
             raise ValueError("Git host settings must be an object")
         host, provider = git_remote.validate_host_provider(patch.get("host"), patch.get("provider"))
         username = str(patch.get("username") or "").strip()
+        auth_method = str(patch.get("auth_method") or "pat").strip().lower()
+        if auth_method not in {"pat", "ssh"}:
+            raise ValueError("Authentication must be a personal access token or SSH key")
         token = patch.get("token")
+        ssh_private_key = patch.get("ssh_private_key")
+        known_hosts = patch.get("known_hosts")
         clear_token = patch.get("clear_token") is True
+        clear_ssh_key = patch.get("clear_ssh_key") is True
         if len(username) > 200 or any(ord(char) < 32 for char in username):
             raise ValueError("Git username is invalid")
         if provider == "forgejo" and token and not username:
             raise ValueError("Forgejo access tokens require a username")
         if token is not None and (not isinstance(token, str) or len(token) > 4096 or any(ord(char) < 32 for char in token)):
             raise ValueError("Git access token is invalid")
+        if ssh_private_key is not None and not isinstance(ssh_private_key, str):
+            raise ValueError("SSH private key must be text")
+        if known_hosts is not None and (not isinstance(known_hosts, str) or len(known_hosts) > 65536):
+            raise ValueError("known_hosts must be text smaller than 64 KB")
         with self.workbench_state_lock:
             data = self._read_settings()
             entries = data.get("git_hosts")
             entries = entries if isinstance(entries, list) else []
+            previous = next((item for item in entries if isinstance(item, dict) and item.get("host") == host), {})
+            previous = previous if isinstance(previous, dict) else {}
+            if not username:
+                username = str(previous.get("username") or "")
+            previous_known_hosts = str(previous.get("known_hosts") or "")
             entries = [item for item in entries if not isinstance(item, dict) or item.get("host") != host]
-            entries.append({"host": host, "provider": provider, "username": username})
             data["git_hosts"] = entries
             secrets = data.setdefault("secrets", {})
             secret_name = self._git_secret_name(host)
+            ssh_secret_name = self._git_ssh_secret_name(host)
+            public_key = str(previous.get("ssh_public_key") or "")
             if clear_token:
                 secrets.pop(secret_name, None)
             elif isinstance(token, str) and token:
                 secrets[secret_name] = token
+            if clear_ssh_key:
+                secrets.pop(ssh_secret_name, None)
+                public_key = ""
+            elif isinstance(ssh_private_key, str) and ssh_private_key.strip():
+                verified_known_hosts = str(known_hosts if known_hosts is not None else previous_known_hosts).strip()
+                public_key = git_remote.inspect_ssh_credentials(host, ssh_private_key, verified_known_hosts)
+                secrets[ssh_secret_name] = ssh_private_key.strip()
+            if known_hosts is not None:
+                known_hosts = known_hosts.strip()
+                if known_hosts and secrets.get(ssh_secret_name):
+                    public_key = git_remote.inspect_ssh_credentials(
+                        host, secrets[ssh_secret_name], known_hosts,
+                    )
+            final_known_hosts = str(known_hosts if known_hosts is not None else previous_known_hosts).strip()
+            if secrets.get(ssh_secret_name):
+                public_key = git_remote.inspect_ssh_credentials(host, secrets[ssh_secret_name], final_known_hosts)
+            if auth_method == "ssh" and (not secrets.get(ssh_secret_name) or not final_known_hosts):
+                raise ValueError("SSH authentication requires a private key and verified known_hosts entry")
+            entries.append({"host": host, "provider": provider, "username": username, "auth_method": auth_method,
+                            "known_hosts": final_known_hosts, "ssh_public_key": public_key})
+            data["git_hosts"] = entries
             self._write_settings(data)
         return self.get_git_hosts()
 
@@ -1566,11 +1611,13 @@ class DashboardState:
             data = self._read_settings()
             data["git_hosts"] = [entry for entry in (data.get("git_hosts") or [])
                                  if not isinstance(entry, dict) or entry.get("host") != host]
-            (data.setdefault("secrets", {})).pop(self._git_secret_name(host), None)
+            secrets = data.setdefault("secrets", {})
+            secrets.pop(self._git_secret_name(host), None)
+            secrets.pop(self._git_ssh_secret_name(host), None)
             self._write_settings(data)
         return {"ok": True, "deleted": host}
 
-    def git_credentials_for_host(self, raw_host):
+    def git_credentials_for_host(self, raw_host, transport="https"):
         host = git_remote.normalize_host(raw_host)
         with self.workbench_state_lock:
             data = self._read_settings()
@@ -1584,6 +1631,13 @@ class DashboardState:
                 return None
             if stored_host != host:
                 return None
+            if transport == "ssh":
+                private_key = (data.get("secrets") or {}).get(self._git_ssh_secret_name(host), "")
+                if not private_key:
+                    return None
+                return {"host": host, "method": "ssh", "private_key": private_key,
+                        "known_hosts": str(entry.get("known_hosts") or ""),
+                        "username": str(entry.get("username") or "")}
             return {"host": host, "provider": provider, "username": entry.get("username", ""),
                     "token": (data.get("secrets") or {}).get(self._git_secret_name(host), "")}
 
@@ -1591,11 +1645,41 @@ class DashboardState:
         remote = git_remote.parse_remote_url(remote_url)
         result = git_remote.clone_repository(
             self.workspace_root, remote.url, destination,
-            credentials=self.git_credentials_for_host(remote.host),
+            credentials=self.git_credentials_for_host(remote.host, remote.transport),
         )
         self.record_event("workspace_git_clone", "Remote Git repository cloned",
                           {"path": result["path"], "host": result["host"]})
         return result
+
+    def workspace_git_status(self, path):
+        return {"ok": True, "status": git_remote.repository_status(self.workspace_root, path)}
+
+    def workspace_git_operation(self, body):
+        if not isinstance(body, dict):
+            raise ValueError("Git operation must be an object")
+        action = str(body.get("action") or "").strip()
+        path = str(body.get("path") or "")
+        if action not in {"commit", "pull_ff", "push"}:
+            raise ValueError("Choose commit, pull_ff, or push")
+        if body.get("confirm") is not True:
+            raise ValueError(f"Confirm the Git {action} operation")
+        status = git_remote.repository_status(self.workspace_root, path)
+        credentials = self.git_credentials_for_host(status["remote_host"], status["remote_transport"]) if status["remote_host"] else None
+        if action == "commit":
+            selected_paths = body.get("paths") if isinstance(body.get("paths"), list) else []
+            sensitive_paths = [str(path) for path in selected_paths if self._looks_sensitive_git_path(str(path))]
+            if sensitive_paths and body.get("confirm_sensitive") is not True:
+                raise ValueError("Selected paths may contain secrets; explicitly confirm_sensitive after reviewing them")
+            result = git_remote.commit_paths(
+                self.workspace_root, status["path"], body.get("paths"), body.get("message"),
+                body.get("author_name"), body.get("author_email"),
+            )
+        elif action == "pull_ff":
+            result = git_remote.pull_fast_forward(self.workspace_root, status["path"], credentials)
+        else:
+            result = git_remote.push_current_branch(self.workspace_root, status["path"], credentials)
+        self.record_event("workspace_git", f"Git {action} completed", {"path": status["path"]})
+        return {"ok": True, "result": result}
 
     def _hermes_job_call(self, prompt):
         # Resolved per call so a rotated gateway key is picked up without a restart.
@@ -3815,6 +3899,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path.split("?", 1)[0] == "/api/git/hosts":
             self._send_json(self.state.get_git_hosts())
             return
+        if self.path.split("?", 1)[0] == "/api/workspace/git/status":
+            try:
+                payload = self.state.workspace_git_status(self._query_params().get("path", ""))
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            self._send_json(payload)
+            return
         if self.path.split("?", 1)[0] == "/api/jobs" or self.path.startswith("/api/jobs/"):
             self._jobs_get()
             return
@@ -4304,7 +4396,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "deleted": profile_id})
             return
-        if clean_path in ("/api/git/hosts", "/api/git/hosts/delete", "/api/workspace/git/clone"):
+        if clean_path in ("/api/git/hosts", "/api/git/hosts/delete", "/api/workspace/git/clone",
+                  "/api/workspace/git/operation"):
             try:
                 body = self._read_json_body()
                 if not isinstance(body, dict):
@@ -4313,9 +4406,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     payload = self.state.save_git_host(body)
                 elif clean_path == "/api/git/hosts/delete":
                     payload = self.state.delete_git_host(body.get("host"))
-                else:
+                elif clean_path == "/api/workspace/git/clone":
                     result = self.state.clone_workspace_git(body.get("url"), body.get("destination"))
                     payload = {"ok": True, **result}
+                else:
+                    payload = self.state.workspace_git_operation(body)
             except json.JSONDecodeError:
                 self._send_json({"ok": False, "message": "Invalid JSON body"}, status=400)
                 return

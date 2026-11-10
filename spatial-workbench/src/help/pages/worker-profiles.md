@@ -18,7 +18,9 @@ For a project job, select a Git repository inside the workspace and its local ba
 4. Choose **Merge to base** only when you want the local merge and the base repository is clean and checked out on the configured branch.
 5. Choose **Push & create PR/MR** when you want the worker branch pushed to the configured HTTPS remote and a provider review request opened. Confirm the action; it does not merge the request.
 
-Merging and publishing are real remote/local repository mutations, not previews. Publishing requires a saved host token with write access to the repository and a completed worker with no uncommitted changes. It pushes directly to `origin`; automatic fork creation is not supported. A pushed branch is not force-updated; if request creation fails, retrying checks for an existing request before creating another.
+Merging and publishing are real remote/local repository mutations, not previews. Publishing requires a saved provider PAT with write access to the repository and a completed worker with no uncommitted changes. SSH keys can authenticate Git transport but cannot create provider API review requests. It pushes directly to `origin`; automatic fork creation is not supported. A pushed branch is not force-updated; if request creation fails, retrying checks for an existing request before creating another.
+
+The AI can inspect project Git status with `git_status`. It can commit selected paths, fast-forward pull, or push only when you explicitly request those actions; direct-chat writes use the normal approval policy, and every Git write endpoint requires confirmation.
 
 ## Attempts and cleanup
 

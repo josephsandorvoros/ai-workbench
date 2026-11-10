@@ -3035,6 +3035,15 @@ h3 {
 .project-git-actions { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
 .project-git-host { border-top: 1px solid var(--color-border); display: grid; gap: var(--space-xs); min-width: 0; padding-top: var(--space-xs); }
 .project-git-host > span { color: var(--color-text-muted); font-size: var(--font-size-xs); overflow-wrap: anywhere; }
+.project-git-public-key { display: grid; gap: var(--space-xs); min-width: 0; }
+.project-git-public-key textarea { font-family: var(--font-family-mono); font-size: var(--font-size-2xs); overflow-wrap: anywhere; resize: vertical; }
+.project-git-state { border-bottom: 1px solid var(--color-border); display: grid; font-size: var(--font-size-xs); gap: var(--space-3xs); min-width: 0; overflow-wrap: anywhere; padding-bottom: var(--space-xs); }
+.project-git-state > span { color: var(--color-text-muted); }
+.project-git-change-list { display: grid; gap: var(--space-3xs); list-style: none; margin: 0; max-height: 220px; overflow: auto; padding: 0; }
+.project-git-change-list label { align-items: start; display: flex; gap: var(--space-xs); min-width: 0; }
+.project-git-change-list input[type="checkbox"] { flex: 0 0 auto; margin: 2px 0 0; }
+.project-git-change-list span { overflow-wrap: anywhere; }
+.project-git-change-list strong { color: var(--color-status-warning); font-family: var(--font-family-mono); }
 .project-git-setup details { display: grid; gap: var(--space-xs); }
 .project-git-setup details > summary { color: var(--color-text-secondary); cursor: pointer; font-size: var(--font-size-xs); }
 .project-git-setup details > .muted { font-size: var(--font-size-xs); margin: 0; }

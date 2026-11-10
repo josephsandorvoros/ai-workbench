@@ -5,6 +5,7 @@ import io
 import json
 import os
 import socket
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -1469,7 +1470,8 @@ class ApiContractTests(unittest.TestCase):
                 "host": "https://GitHub.com/", "provider": "github", "token": "private-access-token",
             })
             self.assertEqual(saved["hosts"], [{
-                "host": "github.com", "provider": "github", "username": "", "token_set": True,
+                "host": "github.com", "provider": "github", "username": "", "auth_method": "pat",
+                "token_set": True, "ssh_key_set": False, "ssh_public_key": "", "known_hosts_set": False,
             }])
             _, listed = server.get_json("/api/git/hosts")
             self.assertNotIn("private-access-token", json.dumps(listed))
@@ -1495,6 +1497,116 @@ class ApiContractTests(unittest.TestCase):
             self.assertEqual(deleted["deleted"], "github.com")
             self.assertNotIn(secret_name, json.loads(settings_path.read_text(encoding="utf-8"))["secrets"])
 
+    def test_git_host_ssh_key_is_write_only_and_known_host_pinned(self):
+        if not shutil.which("ssh-keygen"):
+            self.skipTest("ssh-keygen is unavailable")
+        with contract_server() as server:
+            client_key = server.temp_root / "client-key"
+            host_key = server.temp_root / "host-key"
+            for path in (client_key, host_key):
+                subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(path)], check=True)
+            host_parts = host_key.with_suffix(".pub").read_text(encoding="utf-8").split()
+            known_hosts = f"[forgejo.example]:2222 {host_parts[0]} {host_parts[1]} test-host"
+            private_key = client_key.read_text(encoding="utf-8")
+            _, saved = server.post_json("/api/git/hosts", {
+                "host": "forgejo.example:2222", "provider": "forgejo", "username": "git",
+                "auth_method": "ssh", "ssh_private_key": private_key, "known_hosts": known_hosts,
+            })
+            host = saved["hosts"][0]
+            self.assertTrue(host["ssh_key_set"])
+            self.assertTrue(host["known_hosts_set"])
+            self.assertEqual(host["ssh_public_key"], client_key.with_suffix(".pub").read_text(encoding="utf-8").strip())
+            self.assertNotIn(private_key, json.dumps(saved))
+            credentials = server.server.state.git_credentials_for_host("forgejo.example:2222", "ssh")
+            self.assertEqual(credentials["private_key"], private_key.strip())
+            self.assertEqual(credentials["known_hosts"], known_hosts)
+            with self.assertRaises(HTTPError) as raised:
+                server.post_json("/api/git/hosts", {
+                    "host": "forgejo.example:2222", "provider": "forgejo", "username": "git",
+                    "auth_method": "ssh", "ssh_private_key": private_key,
+                    "known_hosts": "[wrong.example]:2222 ssh-ed25519 AAAA test",
+                })
+            self.assertEqual(raised.exception.code, 400)
+            ssh_secret_name = server.server.state._git_ssh_secret_name("forgejo.example:2222")
+            _, deleted = server.post_json("/api/git/hosts/delete", {"host": "forgejo.example:2222"})
+            self.assertEqual(deleted["deleted"], "forgejo.example:2222")
+            stored = json.loads((server.temp_root / "hermes" / "spatial-workbench" / "settings.json").read_text(encoding="utf-8"))
+            self.assertNotIn(ssh_secret_name, stored["secrets"])
+
+    def test_workspace_git_status_and_commit_require_confirmation(self):
+        with contract_server() as server:
+            repo = server.workspace_root / "projects" / "git-api"
+            repo.mkdir(parents=True)
+            subprocess.run(["git", "init", "-b", "main", str(repo)], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "API Test"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "api-test@example.invalid"], capture_output=True, check=True)
+            readme = repo / "README.md"
+            readme.write_text("# Original\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "README.md"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], capture_output=True, check=True)
+            readme.write_text("# Changed\n", encoding="utf-8")
+
+            _, response = server.get_json("/api/workspace/git/status", {"path": "projects/git-api"})
+            self.assertEqual(response["status"]["branch"], "main")
+            self.assertEqual(response["status"]["changes"][0]["path"], "README.md")
+            with self.assertRaises(HTTPError) as raised:
+                server.post_json("/api/workspace/git/operation", {
+                    "action": "commit", "path": "projects/git-api", "paths": ["README.md"], "message": "Update",
+                    "author_name": "API Test", "author_email": "api-test@example.invalid",
+                })
+            self.assertEqual(raised.exception.code, 400)
+            _, committed = server.post_json("/api/workspace/git/operation", {
+                "action": "commit", "confirm": True, "path": "projects/git-api", "paths": ["README.md"],
+                "message": "Update README", "author_name": "API Test", "author_email": "api-test@example.invalid",
+            })
+            self.assertTrue(committed["ok"])
+            self.assertEqual(committed["result"]["message"], "Update README")
+
+    def test_workspace_git_push_requires_confirmation(self):
+        with contract_server() as server:
+            repo = server.workspace_root / "projects" / "git-push"
+            repo.mkdir(parents=True)
+            subprocess.run(["git", "init", "-b", "main", str(repo)], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "API Test"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "api-test@example.invalid"], capture_output=True, check=True)
+            (repo / "README.md").write_text("# Push\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "README.md"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/acme/git-push.git"], capture_output=True, check=True)
+            with patch.object(dashboard_server.git_remote, "push_current_branch", return_value={"path": "projects/git-push"}) as push:
+                with self.assertRaises(HTTPError) as raised:
+                    server.post_json("/api/workspace/git/operation", {"action": "push", "path": "projects/git-push"})
+                self.assertEqual(raised.exception.code, 400)
+                push.assert_not_called()
+                _, result = server.post_json("/api/workspace/git/operation", {
+                    "action": "push", "path": "projects/git-push", "confirm": True,
+                })
+            self.assertTrue(result["ok"])
+            push.assert_called_once()
+
+    def test_workspace_git_commit_requires_sensitive_file_acknowledgement(self):
+        with contract_server() as server:
+            repo = server.workspace_root / "projects" / "git-secret-check"
+            repo.mkdir(parents=True)
+            subprocess.run(["git", "init", "-b", "main", str(repo)], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "API Test"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "api-test@example.invalid"], capture_output=True, check=True)
+            (repo / ".env.example").write_text("TOKEN=placeholder\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", ".env.example"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], capture_output=True, check=True)
+            (repo / ".env.example").write_text("TOKEN=placeholder-2\n", encoding="utf-8")
+            body = {
+                "action": "commit", "confirm": True, "path": "projects/git-secret-check",
+                "paths": [".env.example"], "message": "Update env example",
+                "author_name": "API Test", "author_email": "api-test@example.invalid",
+            }
+            with self.assertRaises(HTTPError) as raised:
+                server.post_json("/api/workspace/git/operation", body)
+            self.assertEqual(raised.exception.code, 400)
+            body["confirm_sensitive"] = True
+            _, result = server.post_json("/api/workspace/git/operation", body)
+            self.assertTrue(result["ok"])
+
     def test_git_host_credentials_reject_invalid_hosts_and_forgejo_without_username(self):
         with contract_server() as server:
             for body in (
@@ -1519,6 +1631,33 @@ class ApiContractTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(clone.call_args.kwargs["credentials"]["token"], "private-access-token")
             self.assertNotIn("private-access-token", json.dumps(result))
+
+    def test_workspace_git_ssh_clone_uses_saved_key_without_returning_it(self):
+        if not shutil.which("ssh-keygen"):
+            self.skipTest("ssh-keygen is unavailable")
+        with contract_server() as server:
+            client_key = server.temp_root / "ssh-client-key"
+            host_key = server.temp_root / "ssh-host-key"
+            for path in (client_key, host_key):
+                subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(path)], check=True)
+            host_parts = host_key.with_suffix(".pub").read_text(encoding="utf-8").split()
+            known_hosts = f"forgejo.example {host_parts[0]} {host_parts[1]} test-host"
+            private_key = client_key.read_text(encoding="utf-8").strip()
+            server.post_json("/api/git/hosts", {
+                "host": "forgejo.example", "provider": "forgejo", "username": "git", "auth_method": "ssh",
+                "ssh_private_key": private_key, "known_hosts": known_hosts,
+            })
+            with patch.object(dashboard_server.git_remote, "clone_repository", return_value={
+                "path": "projects/repo", "branch": "main", "remote": "ssh://git@forgejo.example/o/r.git",
+                "host": "forgejo.example", "transport": "ssh",
+            }) as clone:
+                _, result = server.post_json("/api/workspace/git/clone", {
+                    "url": "git@forgejo.example:o/r.git", "destination": "projects/repo",
+                })
+            self.assertTrue(result["ok"])
+            self.assertEqual(clone.call_args.kwargs["credentials"]["method"], "ssh")
+            self.assertEqual(clone.call_args.kwargs["credentials"]["private_key"], private_key)
+            self.assertNotIn(private_key, json.dumps(result))
 
     def test_workspace_git_clone_rejects_non_https_and_outside_destination(self):
         with contract_server() as server:

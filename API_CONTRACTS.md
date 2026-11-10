@@ -54,9 +54,11 @@ This document is the active contract reference for the AI Workbench companion AP
 | `/api/workspace/status` | GET | Scoped file metadata check | Browser polling watcher and conflict detection |
 | `/api/workspace/download` | GET | Scoped file/folder download (folders zipped) | Browser download buttons in the project explorer |
 | `/api/workspace/write` | POST | Scoped text/code file write with conflict checks | Controlled Monaco saves and future guarded agent edits |
-| `/api/workspace/git/clone` | POST | Clone an HTTPS Git repository into a new workspace `projects/` path | Projects clone panel |
-| `/api/git/hosts` | GET/POST | List sanitized Git hosts or save provider metadata and a write-only token | Projects Git host credentials |
-| `/api/git/hosts/delete` | POST | Remove a Git host and its stored token | Projects Git host credentials |
+| `/api/workspace/git/clone` | POST | Clone an HTTPS or SSH Git repository into a new workspace `projects/` path | Projects clone panel |
+| `/api/git/hosts` | GET/POST | List sanitized Git hosts or save provider metadata and write-only PAT/SSH credentials | Projects Git host credentials |
+| `/api/git/hosts/delete` | POST | Remove a Git host and its stored credentials | Projects Git host credentials |
+| `/api/workspace/git/status` | GET | Read branch, upstream, changed files, and ahead/behind counts for a project repo | Projects Git panel and AI Git status tool |
+| `/api/workspace/git/operation` | POST | Confirmed selected-file commit, fast-forward pull, or non-force push | Projects Git panel and AI Git tools |
 | `/api/jobs` | GET/POST | Job board list and create | Jobs board UI |
 | `/api/jobs/{id}` | GET | Single job with subtasks and events | Jobs board UI |
 | `/api/jobs/{id}/{action}` | POST | Job actions: answer, approve, move, stop, retry, archive | Jobs board UI |
@@ -331,9 +333,11 @@ Job `stage` is one of `inbox`, `review`, `needs_input`, `planned`, `running`, `r
 
 `GET /api/jobs/{id}/subtasks/{n}/log` returns `ok` and `log` (raw OpenCode JSON lines, last 400 lines). The `/stream` route emits JSON `data:` events with `log`, `replace`, and `status`. `GET /project` returns changed files, uncommitted files, branch, and merge state. Attempt records include remote push/review-request status and an HTTPS review URL when present. `GET /api/jobs/{id}/comms` returns `ok`, `job_id`, and `threads` (per-subtask clarification history with `pending`, `rounds`, and `entries`).
 
-`GET /api/git/hosts` returns only host, provider, optional username, and a `token_set` boolean. `POST /api/git/hosts` accepts `host`, `provider` (`github`, `gitlab`, or `forgejo`), optional `username`, optional `token`, and `clear_token`; tokens are never returned. `POST /api/git/hosts/delete` accepts a host and removes its metadata and token. Tokens are stored in the companion settings file with mode `0600`; they are not encrypted at rest.
+`GET /api/git/hosts` returns only host, provider, optional username, auth method, public SSH key and configured booleans. `POST /api/git/hosts` accepts `host`, `provider` (`github`, `gitlab`, or `forgejo`), optional `username`, PAT/SSH key material and verified `known_hosts` text; private values are never returned. `POST /api/git/hosts/delete` accepts a host and removes its metadata and both credential types. PATs and SSH keys are stored in the companion settings file with mode `0600`; they are not encrypted at rest. SSH operations require strict host-key checking against the stored known_hosts entry.
 
-`POST /api/workspace/git/clone` accepts `{url, destination}`. URLs must use HTTPS and cannot embed credentials. Destinations must be new paths beneath `projects/`. Unconfigured hosts must resolve to globally routable addresses; explicitly configured Git hosts may point to self-hosted/private addresses. Cloning a public repository does not require a token.
+`POST /api/workspace/git/clone` accepts `{url, destination}`. URLs may use HTTPS or SSH but cannot embed credentials. Destinations must be new paths beneath `projects/`. Unconfigured hosts must resolve to globally routable addresses; explicitly configured Git hosts may point to self-hosted/private addresses. Cloning a public HTTPS repository does not require credentials.
+
+`GET /api/workspace/git/status?path=projects/name` is read-only and restricted to a Git repository under `projects/`. `POST /api/workspace/git/operation` accepts `{action, path, confirm: true}`. `commit` additionally accepts selected changed `paths`, `message`, `author_name`, and `author_email`; pre-staged changes are rejected to prevent committing unrelated files. Filenames that resemble secrets (`.env*`, `*secret*`, `*credential*`, key/certificate files) also require `confirm_sensitive: true`. `pull_ff` fetches the origin upstream and refuses non-fast-forward histories. `push` pushes the current branch without force. Every operation requires `confirm: true`.
 
 Worker profiles are independent from chat/provider profiles. `GET /api/worker-profiles` lists them; `POST` creates or updates a profile with `id` (optional), `name`, `instructions`, `runtime` (`opencode`), `model`, `skills` (up to five installed Hermes skill paths), and `permission_preset` (`guarded` or `trusted`). The deployment-wide `JOB_AUTO_APPROVE` setting is always an upper bound on worker permissions. Deleting a profile does not change existing job or attempt snapshots.
 

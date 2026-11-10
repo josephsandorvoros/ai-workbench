@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { GIT_TOOLS } from "./gitTools.ts";
 
 import {
   applyMentionToInput,
@@ -19,6 +20,7 @@ test("isMutatingTool: read-only tools never need approval", () => {
   assert.equal(isMutatingTool("web_fetch"), false);
   assert.equal(isMutatingTool("read_html_artifact"), false);
   assert.equal(isMutatingTool("read_code_file"), false);
+  assert.equal(isMutatingTool("git_status"), false);
   assert.equal(isMutatingTool("search_wiki"), false);
   assert.equal(isMutatingTool("read_wiki_file"), false);
   assert.equal(isMutatingTool("add_board_node"), true);
@@ -29,6 +31,10 @@ test("isMutatingTool: read-only tools never need approval", () => {
   assert.equal(isMutatingTool("edit_wiki_file"), true);
   assert.equal(isMutatingTool("start_app_preview"), true);
   assert.equal(isMutatingTool("stop_app_preview"), true);
+  assert.equal(isMutatingTool("git_commit"), true);
+  assert.equal(isMutatingTool("git_pull_ff"), true);
+  assert.equal(isMutatingTool("git_push"), true);
+  assert.deepEqual(GIT_TOOLS.map((tool) => tool.name), ["git_status", "git_commit", "git_pull_ff", "git_push"]);
 });
 
 test("summarizeToolCall builds one-line summaries", () => {

@@ -164,6 +164,9 @@ export interface GitHostConnection {
   provider: GitProvider;
   username: string;
   token_set: boolean;
+  ssh_key_set: boolean;
+  ssh_public_key: string;
+  known_hosts_set: boolean;
 }
 
 export interface WorkspaceGitClone {
@@ -172,6 +175,30 @@ export interface WorkspaceGitClone {
   remote: string;
   host: string;
 }
+
+export interface WorkspaceGitChange {
+  path: string;
+  related_path: string | null;
+  status: string;
+  conflicted: boolean;
+  staged: boolean;
+}
+
+export interface WorkspaceGitStatus {
+  path: string;
+  branch: string;
+  upstream: string;
+  ahead: number | null;
+  behind: number | null;
+  remote_host: string;
+  remote_transport: "https" | "ssh" | "";
+  changes: WorkspaceGitChange[];
+  clean: boolean;
+  author_name: string;
+  author_email: string;
+}
+
+export type WorkspaceGitOperation = "commit" | "pull_ff" | "push";
 
 export interface WorkspaceListResponse {
   ok: boolean;
@@ -391,13 +418,24 @@ export const compatClient = {
       path, branch, inventory_hash: inventoryHash, confirm_existing: confirmExisting,
     }),
   getGitHosts: () => getJson<{ ok: boolean; hosts: GitHostConnection[] }>("/api/git/hosts"),
-  saveGitHost: (host: string, provider: GitProvider, username: string, token: string) =>
-    postJson<{ ok: boolean; hosts: GitHostConnection[] }>("/api/git/hosts", { host, provider, username, token }),
+  saveGitHost: (host: string, provider: GitProvider, username: string, authMethod: "pat" | "ssh", token: string, sshPrivateKey: string, knownHosts: string) =>
+    postJson<{ ok: boolean; hosts: GitHostConnection[] }>("/api/git/hosts", {
+      host, provider, username, auth_method: authMethod,
+      ...(token ? { token } : {}),
+      ...(sshPrivateKey.trim() ? { ssh_private_key: sshPrivateKey } : {}),
+      ...(knownHosts.trim() ? { known_hosts: knownHosts } : {}),
+    }),
   clearGitHostToken: (host: string, provider: GitProvider, username: string) =>
     postJson<{ ok: boolean; hosts: GitHostConnection[] }>("/api/git/hosts", { host, provider, username, clear_token: true }),
+  clearGitHostSSHKey: (host: string, provider: GitProvider, username: string) =>
+    postJson<{ ok: boolean; hosts: GitHostConnection[] }>("/api/git/hosts", { host, provider, username, clear_ssh_key: true }),
   deleteGitHost: (host: string) => postJson<{ ok: boolean; deleted: string }>("/api/git/hosts/delete", { host }),
   cloneWorkspaceGit: (url: string, destination: string) =>
     postJson<{ ok: boolean } & WorkspaceGitClone>("/api/workspace/git/clone", { url, destination }),
+  getWorkspaceGitStatus: (path: string) =>
+    getJson<{ ok: boolean; status: WorkspaceGitStatus }>(withQuery("/api/workspace/git/status", { path })),
+  runWorkspaceGitOperation: (body: { action: WorkspaceGitOperation; path: string; confirm: true; confirm_sensitive?: boolean; paths?: string[]; message?: string; author_name?: string; author_email?: string }) =>
+    postJson<{ ok: boolean; result: WorkspaceGitStatus | { path: string; commit: string; message: string; files: string[] } }>("/api/workspace/git/operation", body),
   uploadFile: (filename: string, contentBase64: string) =>
     postJson<{ ok: boolean; path: string; name: string; size: number }>("/api/workspace/upload", {
       filename,

@@ -1,7 +1,7 @@
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { updateAgentProvider, useAgentProvider } from "../agent/agentStore";
-import { compatClient, type AppPreviewSession, type CapabilityState, type GitHostConnection, type GitProvider, type WorkspaceEntry, type WorkspaceGitPreview } from "../api/compatClient";
+import { compatClient, type AppPreviewSession, type CapabilityState, type GitHostConnection, type GitProvider, type WorkspaceEntry, type WorkspaceGitPreview, type WorkspaceGitStatus, type WorkspaceGitOperation } from "../api/compatClient";
 import { formatWorkspaceJson, workspaceFileKind, WORKSPACE_PREVIEW_MAX_BYTES } from "../agent/workspacePreview";
 import { DEFAULT_HTML_ARTIFACT } from "../agent/htmlArtifact";
 import { prepareAttachment } from "../agent/attachments";
@@ -46,6 +46,12 @@ function formatBytes(bytes: number | undefined) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function isLikelySecretPath(path: string) {
+  const name = path.split("/").at(-1)?.toLowerCase() || "";
+  return name.startsWith(".env") || name.includes("secret") || name.includes("credential")
+    || [".pem", ".key", ".p12", ".pfx"].some((extension) => name.endsWith(extension));
+}
+
 function languageForPath(path: string) {
   const lower = path.toLowerCase();
   if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
@@ -87,6 +93,16 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
   const [creatingFileBusy, setCreatingFileBusy] = useState(false);
   const [newFileError, setNewFileError] = useState("");
   const [gitSetupOpen, setGitSetupOpen] = useState(false);
+  const [gitManageOpen, setGitManageOpen] = useState(false);
+  const [gitRepositoryPath, setGitRepositoryPath] = useState("projects/");
+  const [gitStatus, setGitStatus] = useState<WorkspaceGitStatus | null>(null);
+  const [gitStatusBusy, setGitStatusBusy] = useState(false);
+  const [gitOperationBusy, setGitOperationBusy] = useState(false);
+  const [gitOperationMessage, setGitOperationMessage] = useState("");
+  const [selectedGitPaths, setSelectedGitPaths] = useState<Set<string>>(() => new Set());
+  const [gitCommitMessage, setGitCommitMessage] = useState("");
+  const [gitAuthorName, setGitAuthorName] = useState("");
+  const [gitAuthorEmail, setGitAuthorEmail] = useState("");
   const [gitCloneOpen, setGitCloneOpen] = useState(false);
   const [gitCloneUrl, setGitCloneUrl] = useState("");
   const [gitClonePath, setGitClonePath] = useState("projects/new-repository");
@@ -95,8 +111,11 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
   const [gitHosts, setGitHosts] = useState<GitHostConnection[]>([]);
   const [gitHostName, setGitHostName] = useState("");
   const [gitHostProvider, setGitHostProvider] = useState<GitProvider>("github");
+  const [gitAuthMethod, setGitAuthMethod] = useState<"pat" | "ssh">("pat");
   const [gitHostUsername, setGitHostUsername] = useState("");
   const [gitHostToken, setGitHostToken] = useState("");
+  const [gitSshPrivateKey, setGitSshPrivateKey] = useState("");
+  const [gitSshKnownHosts, setGitSshKnownHosts] = useState("");
   const [gitHostBusy, setGitHostBusy] = useState(false);
   const [gitHostMessage, setGitHostMessage] = useState("");
   const [gitSetupPath, setGitSetupPath] = useState("");
@@ -472,12 +491,17 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
     setGitHostBusy(true);
     setGitHostMessage("");
     try {
-      const result = await compatClient.saveGitHost(gitHostName.trim(), gitHostProvider, gitHostUsername.trim(), gitHostToken);
+      const result = await compatClient.saveGitHost(
+        gitHostName.trim(), gitHostProvider, gitHostUsername.trim(), gitAuthMethod,
+        gitHostToken, gitSshPrivateKey, gitSshKnownHosts,
+      );
       setGitHosts(result.hosts);
       setGitHostName("");
       setGitHostUsername("");
       setGitHostToken("");
-      setGitHostMessage("Git host saved. The token stays on the server.");
+      setGitSshPrivateKey("");
+      setGitSshKnownHosts("");
+      setGitHostMessage(gitAuthMethod === "ssh" ? "SSH key saved. The private key stays on the server." : "Git host saved. The token stays on the server.");
     } catch (error) {
       setGitHostMessage(`Could not save Git host: ${error}`);
     } finally {
@@ -499,6 +523,20 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
     }
   }
 
+  async function clearGitHostSSHKey(host: GitHostConnection) {
+    if (!window.confirm(`Clear the saved SSH key for ${host.host}?`)) return;
+    setGitHostBusy(true);
+    try {
+      const result = await compatClient.clearGitHostSSHKey(host.host, host.provider, host.username);
+      setGitHosts(result.hosts);
+      setGitHostMessage(`SSH key cleared for ${host.host}.`);
+    } catch (error) {
+      setGitHostMessage(`Could not clear SSH key: ${error}`);
+    } finally {
+      setGitHostBusy(false);
+    }
+  }
+
   async function deleteGitHost(host: GitHostConnection) {
     if (!window.confirm(`Remove ${host.host} and its saved access token?`)) return;
     setGitHostBusy(true);
@@ -510,6 +548,77 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
       setGitHostMessage(`Could not remove Git host: ${error}`);
     } finally {
       setGitHostBusy(false);
+    }
+  }
+
+  async function loadGitStatus(path = gitRepositoryPath.trim()): Promise<boolean> {
+    setGitStatusBusy(true);
+    setGitOperationMessage("");
+    try {
+      const result = await compatClient.getWorkspaceGitStatus(path);
+      setGitStatus(result.status);
+      setGitRepositoryPath(result.status.path);
+      setSelectedGitPaths(new Set());
+      setGitAuthorName((current) => current || result.status.author_name);
+      setGitAuthorEmail((current) => current || result.status.author_email);
+      return true;
+    } catch (error) {
+      setGitStatus(null);
+      setGitOperationMessage(`Git status failed: ${error}`);
+      return false;
+    } finally {
+      setGitStatusBusy(false);
+    }
+  }
+
+  function toggleGitChange(change: WorkspaceGitStatus["changes"][number], checked: boolean) {
+    setSelectedGitPaths((current) => {
+      const next = new Set(current);
+      for (const path of [change.path, change.related_path].filter((value): value is string => Boolean(value))) {
+        if (checked) next.add(path);
+        else next.delete(path);
+      }
+      return next;
+    });
+  }
+
+  async function runGitOperation(action: WorkspaceGitOperation) {
+    if (!gitStatus) return;
+    if (action === "commit" && selectedGitPaths.size === 0) {
+      setGitOperationMessage("Select at least one changed file to commit.");
+      return;
+    }
+    const confirmation = action === "commit"
+      ? `${selectedGitPaths.size} selected path(s) in ${gitStatus.path}${[...selectedGitPaths].some(isLikelySecretPath) ? ` include likely secret files: ${[...selectedGitPaths].filter(isLikelySecretPath).join(", ")}. Verify these are safe to commit.\n\n` : "?\n\n"}Continue?`
+      : action === "pull_ff"
+        ? `Fetch and fast-forward ${gitStatus.branch} from ${gitStatus.upstream}?`
+        : `Push committed changes from ${gitStatus.branch} to ${gitStatus.remote_host}?`;
+    if (!window.confirm(confirmation)) return;
+    setGitOperationBusy(true);
+    setGitOperationMessage("");
+    try {
+      const result = await compatClient.runWorkspaceGitOperation({
+        action, path: gitStatus.path, confirm: true,
+        ...(action === "commit" ? {
+          paths: [...selectedGitPaths], message: gitCommitMessage,
+          author_name: gitAuthorName, author_email: gitAuthorEmail,
+          confirm_sensitive: [...selectedGitPaths].some(isLikelySecretPath),
+        } : {}),
+      });
+      let successMessage: string;
+      if (action === "commit" && "commit" in result.result) {
+        successMessage = `Created ${result.result.commit}: ${result.result.message}`;
+        setGitCommitMessage("");
+      } else if (action === "pull_ff") {
+        successMessage = "Fast-forward pull completed.";
+      } else {
+        successMessage = "Push completed.";
+      }
+      if (await loadGitStatus(gitStatus.path)) setGitOperationMessage(successMessage);
+    } catch (error) {
+      setGitOperationMessage(`Git ${action} failed: ${error}`);
+    } finally {
+      setGitOperationBusy(false);
     }
   }
 
@@ -957,6 +1066,10 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
               if (file) void importFile(file);
               event.currentTarget.value = "";
             }} />
+            <button className="btn secondary small" type="button" onClick={() => {
+              setGitManageOpen((open) => !open);
+              if (currentPath.startsWith("projects/")) setGitRepositoryPath(currentPath);
+            }}>Git status</button>
             <button className="btn secondary small" type="button" onClick={() => void openGitClonePanel()}>Clone Git repo</button>
             <button className="btn secondary small" type="button" onClick={() => {
               setGitSetupOpen(!gitSetupOpen);
@@ -1002,27 +1115,67 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
             </div>}
             {gitSetupMessage && <p className={gitSetupMessage.startsWith("Git initialization failed") || gitSetupMessage.startsWith("Preview failed") ? "jobs-error" : "project-git-success"} role="status">{gitSetupMessage}</p>}
           </div>}
+          {gitManageOpen && <div className="project-git-setup project-git-manage">
+            <form onSubmit={(event) => { event.preventDefault(); void loadGitStatus(); }}>
+              <label>Repository path<input value={gitRepositoryPath} onChange={(event) => setGitRepositoryPath(event.target.value)} placeholder="projects/my-repository" required /></label>
+              <button className="btn secondary small" type="submit" disabled={gitStatusBusy}>{gitStatusBusy ? "Checking..." : "Refresh Git status"}</button>
+            </form>
+            {gitStatus && <>
+              <div className="project-git-state">
+                <strong>{gitStatus.path} · {gitStatus.branch || "detached HEAD"}</strong>
+                <span>{gitStatus.upstream ? `${gitStatus.upstream} · ${gitStatus.ahead} ahead · ${gitStatus.behind} behind` : "No upstream configured"}</span>
+                <span>{gitStatus.remote_host ? `origin: ${gitStatus.remote_transport} · ${gitStatus.remote_host}` : "No supported origin remote"}</span>
+              </div>
+              {gitStatus.changes.length > 0 ? <>
+                {[...selectedGitPaths].some(isLikelySecretPath) && <p className="project-git-warning" role="alert">Selected filenames may contain secrets. Review their contents before committing.</p>}
+                <div className="project-git-actions">
+                  <button className="btn secondary small" type="button" onClick={() => setSelectedGitPaths(new Set(gitStatus.changes.flatMap((change) => [change.path, ...(change.related_path ? [change.related_path] : [])])))}>Select all</button>
+                  <button className="btn secondary small" type="button" onClick={() => setSelectedGitPaths(new Set())}>Clear selection</button>
+                </div>
+                <ul className="project-git-change-list">{gitStatus.changes.map((change) => <li key={`${change.path}:${change.related_path || ""}`}>
+                  <label><input type="checkbox" checked={selectedGitPaths.has(change.path)} onChange={(event) => toggleGitChange(change, event.target.checked)} />
+                    <span><strong>{change.status}</strong> {change.path}{change.related_path ? ` ← ${change.related_path}` : ""}{change.conflicted ? " · conflict" : ""}</span></label>
+                </li>)}</ul>
+                <label>Commit message<input value={gitCommitMessage} maxLength={2000} onChange={(event) => setGitCommitMessage(event.target.value)} placeholder="Describe this change" /></label>
+                <label>Author name<input value={gitAuthorName} onChange={(event) => setGitAuthorName(event.target.value)} required /></label>
+                <label>Author email<input type="email" value={gitAuthorEmail} onChange={(event) => setGitAuthorEmail(event.target.value)} required /></label>
+                <button className="btn primary small" type="button" disabled={gitOperationBusy || !gitCommitMessage.trim() || !gitAuthorName.trim() || !gitAuthorEmail.trim() || selectedGitPaths.size === 0} onClick={() => void runGitOperation("commit")}>Commit selected files</button>
+              </> : <p className="muted">Working tree clean.</p>}
+              <div className="project-git-actions">
+                <button className="btn secondary small" type="button" disabled={gitOperationBusy || !gitStatus.upstream} onClick={() => void runGitOperation("pull_ff")}>Pull fast-forward</button>
+                <button className="btn secondary small" type="button" disabled={gitOperationBusy || !gitStatus.remote_host || !gitStatus.branch} onClick={() => void runGitOperation("push")}>Push commits</button>
+              </div>
+            </>}
+            {gitOperationMessage && <p className={gitOperationMessage.includes("failed") ? "jobs-error" : "project-git-success"} role="status">{gitOperationMessage}</p>}
+          </div>}
           {gitCloneOpen && <div className="project-git-setup">
             <form onSubmit={(event) => void cloneGitRepository(event)}>
-              <label>HTTPS repository URL<input type="url" value={gitCloneUrl} onChange={(event) => setGitCloneUrl(event.target.value)} placeholder="https://github.com/owner/repository.git" required /></label>
+              <label>Repository URL<input value={gitCloneUrl} onChange={(event) => setGitCloneUrl(event.target.value)} placeholder="https://github.com/owner/repository.git or git@host:owner/repository.git" required /></label>
               <label>Workspace folder<input value={gitClonePath} onChange={(event) => setGitClonePath(event.target.value)} placeholder="projects/my-repository" required /></label>
               <div className="project-git-actions"><button className="btn primary small" type="submit" disabled={gitCloneBusy}>{gitCloneBusy ? "Cloning..." : "Clone repository"}</button><button className="btn secondary small" type="button" onClick={() => setGitCloneOpen(false)}>Close</button></div>
             </form>
             {gitCloneMessage && <p className={gitCloneMessage.startsWith("Clone failed") ? "jobs-error" : "project-git-success"} role="status">{gitCloneMessage}</p>}
             <details>
               <summary>Git host credentials</summary>
-              <p className="muted">Public repositories need no token. Saved tokens are used by the server for clone, push, and review requests; they are never shown again.</p>
+              <p className="muted">Public HTTPS repositories need no credential. PATs and SSH private keys stay on the server and are never shown again. SSH requires a verified known_hosts entry.</p>
               <form onSubmit={(event) => void saveGitHost(event)}>
                 <label>Host<input value={gitHostName} onChange={(event) => setGitHostName(event.target.value)} placeholder="github.com or forgejo.example" required /></label>
                 <label>Provider<select value={gitHostProvider} onChange={(event) => setGitHostProvider(event.target.value as GitProvider)}><option value="github">GitHub</option><option value="gitlab">GitLab</option><option value="forgejo">Forgejo</option></select></label>
                 {gitHostProvider === "forgejo" && <label>Username<input value={gitHostUsername} onChange={(event) => setGitHostUsername(event.target.value)} required /></label>}
-                <label>Access token<input type="password" autoComplete="new-password" value={gitHostToken} onChange={(event) => setGitHostToken(event.target.value)} placeholder="Enter a token; leave blank to keep the saved token" /></label>
+                <label>Authentication<select value={gitAuthMethod} onChange={(event) => setGitAuthMethod(event.target.value as "pat" | "ssh")}><option value="pat">Personal access token</option><option value="ssh">SSH key</option></select></label>
+                {gitAuthMethod === "pat" ? <label>Access token<input type="password" autoComplete="new-password" value={gitHostToken} onChange={(event) => setGitHostToken(event.target.value)} placeholder="Enter to save or rotate; blank keeps the saved token" /></label> : <>
+                  <label>Unencrypted SSH private key<textarea rows={5} autoComplete="off" spellCheck={false} value={gitSshPrivateKey} onChange={(event) => setGitSshPrivateKey(event.target.value)} placeholder="Paste an unencrypted OpenSSH private key; blank keeps the saved key" /></label>
+                  <label>Verified known_hosts entry<textarea rows={3} autoComplete="off" spellCheck={false} value={gitSshKnownHosts} onChange={(event) => setGitSshKnownHosts(event.target.value)} placeholder="Paste the host's verified known_hosts line" /></label>
+                </>}
                 <button className="btn primary small" type="submit" disabled={gitHostBusy || !gitHostName.trim()}>{gitHostBusy ? "Saving..." : "Save Git host"}</button>
               </form>
               {gitHosts.map((host) => <div className="project-git-host" key={host.host}>
-                <span><strong>{host.host}</strong> · {host.provider} · {host.token_set ? "token saved" : "no token"}</span>
+                <span><strong>{host.host}</strong> · {host.provider} · {host.token_set ? "PAT saved" : "no PAT"} · {host.ssh_key_set ? "SSH key saved" : "no SSH key"}</span>
+                {host.ssh_public_key && <div className="project-git-public-key"><textarea rows={2} readOnly aria-label={`Public SSH key for ${host.host}`} value={host.ssh_public_key} /><button className="btn secondary small" type="button" onClick={() => void navigator.clipboard.writeText(host.ssh_public_key)}>Copy public key</button></div>}
                 <div className="project-git-actions">
                   {host.token_set && <button className="btn secondary small" type="button" disabled={gitHostBusy} onClick={() => void clearGitHostToken(host)}>Clear token</button>}
+                  {host.ssh_key_set && <button className="btn secondary small" type="button" disabled={gitHostBusy} onClick={() => void clearGitHostSSHKey(host)}>Clear SSH key</button>}
+                  <button className="btn secondary small" type="button" disabled={gitHostBusy} onClick={() => { setGitHostName(host.host); setGitHostProvider(host.provider); setGitHostUsername(host.username); setGitAuthMethod(host.ssh_key_set ? "ssh" : "pat"); setGitHostToken(""); setGitSshPrivateKey(""); setGitSshKnownHosts(""); }}>Edit</button>
                   <button className="btn danger small" type="button" disabled={gitHostBusy} onClick={() => void deleteGitHost(host)}>Remove</button>
                 </div>
               </div>)}

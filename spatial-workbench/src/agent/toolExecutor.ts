@@ -105,6 +105,40 @@ export async function executeTool(
 ): Promise<ToolExecutionResult> {
   try {
     switch (name) {
+      case "git_status": {
+        const path = toWorkspaceRelativePath(String(args.path ?? ""));
+        if (!path) return { ok: false, output: "Missing project repository path." };
+        const { status } = await compatClient.getWorkspaceGitStatus(path);
+        return { ok: true, output: JSON.stringify(status, null, 2) };
+      }
+
+      case "git_commit": {
+        const path = toWorkspaceRelativePath(String(args.path ?? ""));
+        const paths = Array.isArray(args.paths) ? args.paths.filter((value): value is string => typeof value === "string") : [];
+        const message = String(args.message ?? "");
+        const authorName = String(args.author_name ?? "");
+        const authorEmail = String(args.author_email ?? "");
+        if (!path || !paths.length || !message || !authorName || !authorEmail) {
+          return { ok: false, output: "git_commit requires a repository, selected paths, a message, and author identity." };
+        }
+        if (args.confirm !== true) return { ok: false, output: "Commit was not confirmed." };
+        const { result } = await compatClient.runWorkspaceGitOperation({
+          action: "commit", path, paths, message, author_name: authorName, author_email: authorEmail,
+          confirm_sensitive: args.confirm_sensitive === true, confirm: true,
+        });
+        return { ok: true, output: `Created commit ${"commit" in result ? result.commit : ""}: ${message}` };
+      }
+
+      case "git_pull_ff":
+      case "git_push": {
+        const path = toWorkspaceRelativePath(String(args.path ?? ""));
+        if (!path) return { ok: false, output: "Missing project repository path." };
+        if (args.confirm !== true) return { ok: false, output: `${name} was not confirmed.` };
+        const action = name === "git_pull_ff" ? "pull_ff" : "push";
+        const { result } = await compatClient.runWorkspaceGitOperation({ action, path, confirm: true });
+        return { ok: true, output: `${action === "push" ? "Pushed" : "Fast-forwarded"} ${path}.\n${JSON.stringify(result, null, 2)}` };
+      }
+
       case "read_code_file": {
         const path = toWorkspaceRelativePath(String(args.path ?? ""));
         if (!path) return { ok: false, output: "Missing path argument." };
