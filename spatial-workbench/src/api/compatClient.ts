@@ -200,6 +200,11 @@ export interface WorkspaceGitStatus {
   author_email: string;
 }
 
+export interface WorkspaceGitRepository {
+  path: string;
+  branch: string;
+}
+
 export interface WorkspaceGitCommit {
   commit: string;
   subject: string;
@@ -441,6 +446,8 @@ export const compatClient = {
   deleteGitHost: (host: string) => postJson<{ ok: boolean; deleted: string }>("/api/git/hosts/delete", { host }),
   cloneWorkspaceGit: (url: string, destination: string) =>
     postJson<{ ok: boolean } & WorkspaceGitClone>("/api/workspace/git/clone", { url, destination }),
+  getWorkspaceGitRepositories: () =>
+    getJson<{ ok: boolean; repositories: WorkspaceGitRepository[] }>("/api/workspace/git/repositories"),
   getWorkspaceGitStatus: (path: string) =>
     getJson<{ ok: boolean; status: WorkspaceGitStatus }>(withQuery("/api/workspace/git/status", { path })),
   getWorkspaceGitHistory: (path: string, limit = 30) =>

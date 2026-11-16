@@ -64,6 +64,38 @@ class GitRemoteTests(unittest.TestCase):
             with self.assertRaisesRegex(git_remote.GitRemoteError, "under projects"):
                 git_remote.resolve_workspace_repository(workspace, "wiki")
 
+    def test_lists_git_repositories_under_projects_without_following_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            (workspace / "projects").mkdir(parents=True)
+            self.make_repository(workspace)
+
+            nested_repo = workspace / "projects" / "demo" / "nested"
+            nested_repo.mkdir()
+            self.run_git("init", "-b", "main", nested_repo)
+
+            separate_repo = workspace / "projects" / "tools"
+            separate_repo.mkdir()
+            self.run_git("init", "-b", "work", separate_repo)
+
+            invalid_repo = workspace / "projects" / "invalid"
+            (invalid_repo / ".git").mkdir(parents=True)
+
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            self.run_git("init", "-b", "outside", outside)
+            (workspace / "projects" / "linked").symlink_to(outside, target_is_directory=True)
+
+            repositories = git_remote.list_workspace_repositories(workspace)
+            self.assertEqual(
+                repositories,
+                [
+                    {"path": "projects/demo", "branch": "main"},
+                    {"path": "projects/demo/nested", "branch": "main"},
+                    {"path": "projects/tools", "branch": "work"},
+                ],
+            )
+
     def test_commit_refuses_unselected_existing_index_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

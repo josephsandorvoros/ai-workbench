@@ -308,6 +308,45 @@ def resolve_workspace_repository(workspace_root, value):
     return top
 
 
+def list_workspace_repositories(workspace_root):
+    root = Path(workspace_root).resolve()
+    projects = (root / "projects").resolve()
+    if not projects.is_dir():
+        return []
+
+    repositories = []
+
+    def raise_scan_error(error):
+        raise GitRemoteError("Could not scan project directories") from error
+
+    for current, directories, files in os.walk(projects, followlinks=False, onerror=raise_scan_error):
+        current_path = Path(current)
+        has_git_marker = ".git" in directories or ".git" in files
+        directories[:] = [
+            name for name in directories
+            if name != ".git"
+            and name not in {"node_modules", ".venv", "venv", "vendor", "dist", "build", "target"}
+            and not (current_path / name).is_symlink()
+        ]
+        if not has_git_marker:
+            continue
+
+        if not _git_returns(["-C", current_path, "rev-parse", "--show-toplevel"]):
+            continue
+        top = Path(_run_git(["-C", current_path, "rev-parse", "--show-toplevel"])).resolve()
+        if top != current_path.resolve() or top == projects or not top.is_relative_to(projects):
+            continue
+        branch = _run_git(["-C", top, "symbolic-ref", "--quiet", "--short", "HEAD"]) if _git_returns(
+            ["-C", top, "symbolic-ref", "--quiet", "--short", "HEAD"]
+        ) else ""
+        repositories.append({
+            "path": (Path("projects") / top.relative_to(projects)).as_posix(),
+            "branch": branch,
+        })
+
+    return sorted(repositories, key=lambda repository: repository["path"].casefold())
+
+
 def repository_status(workspace_root, value):
     repo = resolve_workspace_repository(workspace_root, value)
     branch = _run_git(["-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD"]) if _git_returns(

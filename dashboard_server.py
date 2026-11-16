@@ -1654,6 +1654,9 @@ class DashboardState:
     def workspace_git_status(self, path):
         return {"ok": True, "status": git_remote.repository_status(self.workspace_root, path)}
 
+    def workspace_git_repositories(self):
+        return {"ok": True, "repositories": git_remote.list_workspace_repositories(self.workspace_root)}
+
     def workspace_git_history(self, path, limit=30):
         return {"ok": True, **git_remote.repository_history(self.workspace_root, path, limit)}
 
@@ -3931,6 +3934,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path.split("?", 1)[0] == "/api/workspace/git/status":
             try:
                 payload = self.state.workspace_git_status(self._query_params().get("path", ""))
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            self._send_json(payload)
+            return
+        if self.path.split("?", 1)[0] == "/api/workspace/git/repositories":
+            try:
+                payload = self.state.workspace_git_repositories()
             except ValueError as exc:
                 self._send_json({"ok": False, "message": str(exc)}, status=400)
                 return

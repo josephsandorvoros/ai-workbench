@@ -616,7 +616,11 @@ export function App() {
               role="tabpanel"
               aria-label="Source Control"
             >
-              <SourceControlWorkbench active={activeWorkspaceTab === "source-control"} initialPath={sourceControlPath} />
+              <SourceControlWorkbench
+                active={activeWorkspaceTab === "source-control"}
+                initialPath={sourceControlPath}
+                onOpenProjects={() => selectWorkspaceTab("project")}
+              />
             </div>
             <div
               hidden={activeWorkspaceTab !== "wiki"}

@@ -1549,6 +1549,11 @@ class ApiContractTests(unittest.TestCase):
             _, response = server.get_json("/api/workspace/git/status", {"path": "projects/git-api"})
             self.assertEqual(response["status"]["branch"], "main")
             self.assertEqual(response["status"]["changes"][0]["path"], "README.md")
+            _, repositories = server.get_json("/api/workspace/git/repositories")
+            self.assertEqual(
+                repositories["repositories"],
+                [{"path": "projects/git-api", "branch": "main"}],
+            )
             with self.assertRaises(HTTPError) as raised:
                 server.post_json("/api/workspace/git/operation", {
                     "action": "commit", "path": "projects/git-api", "paths": ["README.md"], "message": "Update",

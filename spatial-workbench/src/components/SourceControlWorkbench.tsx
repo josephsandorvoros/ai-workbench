@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { compatClient, type WorkspaceGitCommit, type WorkspaceGitOperation, type WorkspaceGitStatus } from "../api/compatClient";
+import { compatClient, type WorkspaceGitCommit, type WorkspaceGitOperation, type WorkspaceGitRepository, type WorkspaceGitStatus } from "../api/compatClient";
 import { Icon } from "./Icon";
 
 function isLikelySecretPath(path: string) {
@@ -12,8 +12,16 @@ function changedPaths(status: WorkspaceGitStatus) {
   return status.changes.flatMap((change) => [change.path, ...(change.related_path ? [change.related_path] : [])]);
 }
 
-export function SourceControlWorkbench({ active, initialPath }: { active: boolean; initialPath: string }) {
-  const [repositoryPath, setRepositoryPath] = useState(initialPath);
+export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: {
+  active: boolean;
+  initialPath: string;
+  onOpenProjects: () => void;
+}) {
+  const [repositories, setRepositories] = useState<WorkspaceGitRepository[]>([]);
+  const [repositoriesBusy, setRepositoriesBusy] = useState(false);
+  const [repositoriesLoaded, setRepositoriesLoaded] = useState(false);
+  const [repositoryLoadError, setRepositoryLoadError] = useState("");
+  const [repositoryPath, setRepositoryPath] = useState("");
   const [status, setStatus] = useState<WorkspaceGitStatus | null>(null);
   const [statusBusy, setStatusBusy] = useState(false);
   const [operationBusy, setOperationBusy] = useState(false);
@@ -28,14 +36,13 @@ export function SourceControlWorkbench({ active, initialPath }: { active: boolea
   const [historyMessage, setHistoryMessage] = useState("");
 
   useEffect(() => {
-    if (!active || !initialPath.trim()) return;
-    setRepositoryPath(initialPath);
-    void loadStatus(initialPath);
+    if (!active) return;
+    void loadRepositories(initialPath);
   }, [active, initialPath]);
 
   async function loadStatus(path = repositoryPath.trim()): Promise<boolean> {
     if (!path) {
-      setMessage("Enter a repository path to inspect its changes.");
+      setMessage("Select a repository to inspect its changes.");
       return false;
     }
     setStatusBusy(true);
@@ -57,6 +64,41 @@ export function SourceControlWorkbench({ active, initialPath }: { active: boolea
       return false;
     } finally {
       setStatusBusy(false);
+    }
+  }
+
+  async function loadRepositories(preferredPath = "") {
+    setRepositoriesBusy(true);
+    setRepositoriesLoaded(false);
+    setRepositoryLoadError("");
+    setMessage("");
+    try {
+      const result = await compatClient.getWorkspaceGitRepositories();
+      setRepositories(result.repositories);
+      const preferred = preferredPath.trim().replace(/\/+$/, "");
+      const selectedRepository = result.repositories
+        .filter((repository) => preferred === repository.path || preferred.startsWith(`${repository.path}/`))
+        .sort((left, right) => right.path.length - left.path.length)[0]
+        ?? result.repositories.find((repository) => repository.path === repositoryPath)
+        ?? null;
+      if (selectedRepository) {
+        setRepositoryPath(selectedRepository.path);
+        void loadStatus(selectedRepository.path);
+      } else {
+        setRepositoryPath("");
+        setStatus(null);
+        setHistory([]);
+        setHistoryMessage("");
+      }
+    } catch (error) {
+      setRepositories([]);
+      setRepositoryPath("");
+      setStatus(null);
+      setRepositoryLoadError(String(error));
+      setMessage(`Could not load Git repositories: ${error}`);
+    } finally {
+      setRepositoriesBusy(false);
+      setRepositoriesLoaded(true);
     }
   }
 
@@ -178,24 +220,39 @@ export function SourceControlWorkbench({ active, initialPath }: { active: boolea
           <h2>Source Control</h2>
           <p>Review changes, choose what to commit, and sync with the remote.</p>
         </div>
-        <form className="source-control-repository-form" onSubmit={(event) => {
-          event.preventDefault();
-          void loadStatus();
-        }}>
-          <label htmlFor="source-control-path">Repository path</label>
+        <div className="source-control-repository-form">
+          <label htmlFor="source-control-repository">Git repository</label>
           <div>
-            <input
-              id="source-control-path"
+            <select
+              id="source-control-repository"
               value={repositoryPath}
-              onChange={(event) => setRepositoryPath(event.target.value)}
-              placeholder="projects/my-repository"
-              required
-            />
-            <button className="btn secondary small" type="submit" disabled={statusBusy}>
-              <Icon name="refresh" size={14} /> {statusBusy ? "Checking..." : "Refresh"}
+              onChange={(event) => {
+                const path = event.target.value;
+                setRepositoryPath(path);
+                setStatus(null);
+                setHistory([]);
+                setMessage("");
+                if (path) void loadStatus(path);
+              }}
+              disabled={repositoriesBusy || repositories.length === 0}
+            >
+              <option value="">{repositoriesBusy ? "Loading repositories..." : "Select a repository"}</option>
+              {repositories.map((repository) => (
+                <option key={repository.path} value={repository.path}>
+                  {repository.path}{repository.branch ? ` · ${repository.branch}` : ""}
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn secondary small"
+              type="button"
+              disabled={repositoriesBusy || statusBusy}
+              onClick={() => void loadRepositories(status?.path || repositoryPath || initialPath)}
+            >
+              <Icon name="refresh" size={14} /> {repositoriesBusy ? "Loading..." : "Refresh"}
             </button>
           </div>
-        </form>
+        </div>
       </header>
 
       {status ? (
@@ -380,8 +437,23 @@ export function SourceControlWorkbench({ active, initialPath }: { active: boolea
       ) : (
         <div className="source-control-empty">
           <Icon name="branch" size={26} />
-          <h3>Open a repository</h3>
-          <p>Enter a repository path under your workspace, or open Source Control from a folder in Projects.</p>
+          <h3>{repositoriesBusy || !repositoriesLoaded
+            ? "Finding repositories"
+            : repositoryLoadError
+              ? "Could not load repositories"
+              : repositories.length
+                ? "Choose a repository"
+                : "No Git repositories found"}</h3>
+          <p>{repositoriesBusy || !repositoriesLoaded
+            ? "Searching projects/ for Git repositories."
+            : repositoryLoadError
+              ? "Refresh the repository list to try again."
+              : repositories.length
+                ? "Select a repository above to review its changes."
+                : "Create or clone a Git repository under projects/ to use Source Control."}</p>
+          {repositoriesLoaded && !repositoryLoadError && !repositories.length && <button className="btn secondary small" type="button" onClick={onOpenProjects}>
+            Open Projects
+          </button>}
         </div>
       )}
       {message && <p className={`source-control-message ${message.startsWith("Could not") || message.startsWith("Git ") ? "error" : ""}`} role="status">{message}</p>}
