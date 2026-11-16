@@ -3143,6 +3143,21 @@ h3 {
 .source-control-history-author,
 .source-control-history-list time { color: var(--color-text-muted); font-size: var(--font-size-xs); }
 .source-control-history-author { overflow-wrap: anywhere; }
+.source-control-tags { display: grid; gap: var(--space-sm); grid-column: 1 / -1; min-width: 0; padding: var(--space-md); }
+.source-control-tag-form { display: grid; gap: var(--space-xs); grid-template-columns: minmax(0, 1fr) auto; min-width: 0; }
+.source-control-tag-form label { color: var(--color-text-secondary); font-size: var(--font-size-xs); grid-column: 1 / -1; }
+.source-control-tag-form input,
+.source-control-tag-form textarea { background: var(--color-bg-primary); border: 1px solid var(--color-border-strong); border-radius: var(--border-radius-sm); color: var(--color-text-primary); font: inherit; min-width: 0; padding: var(--space-sm); }
+.source-control-tag-form input,
+.source-control-tag-form textarea,
+.source-control-tag-form button { grid-column: 1 / -1; }
+.source-control-tag-form textarea { resize: vertical; }
+.source-control-tag-list { display: grid; gap: var(--space-xs); list-style: none; margin: 0; max-height: 240px; overflow: auto; padding: 0; }
+.source-control-tag-list li { align-items: center; border-top: 1px solid var(--color-border); display: flex; flex-wrap: wrap; gap: var(--space-sm); justify-content: space-between; min-width: 0; padding: var(--space-sm) var(--space-xs); }
+.source-control-tag-list li > div { display: grid; flex: 1 1 220px; gap: var(--space-3xs); min-width: 0; }
+.source-control-tag-list strong { color: var(--color-text-primary); font-family: var(--font-family-mono); overflow-wrap: anywhere; }
+.source-control-tag-list span { color: var(--color-text-muted); font-size: var(--font-size-xs); overflow-wrap: anywhere; }
+.source-control-tag-list code { color: var(--color-accent-soft); font-size: var(--font-size-xs); }
 .source-control-section-heading { align-items: center; display: flex; justify-content: space-between; }
 .source-control-section-heading > div { align-items: baseline; display: flex; gap: var(--space-sm); }
 .source-control-section-heading h3 { font-size: var(--font-size-sm); margin: 0; }

@@ -1660,12 +1660,18 @@ class DashboardState:
     def workspace_git_history(self, path, limit=30):
         return {"ok": True, **git_remote.repository_history(self.workspace_root, path, limit)}
 
+    def workspace_git_tags(self, path):
+        return {"ok": True, **git_remote.repository_tags(self.workspace_root, path)}
+
     def workspace_git_operation(self, body):
         if not isinstance(body, dict):
             raise ValueError("Git operation must be an object")
         action = str(body.get("action") or "").strip()
         path = str(body.get("path") or "")
-        allowed_actions = {"commit", "commit_staged", "stage", "unstage", "switch_branch", "pull_ff", "push"}
+        allowed_actions = {
+            "commit", "commit_staged", "stage", "unstage", "switch_branch", "pull_ff", "push",
+            "create_tag", "push_tag",
+        }
         if action not in allowed_actions:
             raise ValueError("Choose a supported Git operation")
         if body.get("confirm") is not True:
@@ -1708,9 +1714,20 @@ class DashboardState:
             result = git_remote.switch_branch(self.workspace_root, status["path"], body.get("branch"))
         elif action == "pull_ff":
             result = git_remote.pull_fast_forward(self.workspace_root, status["path"], credentials)
-        else:
+        elif action == "push":
             result = git_remote.push_current_branch(self.workspace_root, status["path"], credentials)
-        self.record_event("workspace_git", f"Git {action} completed", {"path": status["path"]})
+        elif action == "create_tag":
+            result = git_remote.create_annotated_tag(
+                self.workspace_root, status["path"], body.get("tag_name"), body.get("tag_message"),
+            )
+        else:
+            result = git_remote.push_tag(
+                self.workspace_root, status["path"], body.get("tag_name"), credentials,
+            )
+        self.record_event("workspace_git", f"Git {action} completed", {
+            "path": status["path"],
+            **({"tag": result["tag"]} if action in {"create_tag", "push_tag"} else {}),
+        })
         return {"ok": True, "result": result}
 
     def _hermes_job_call(self, prompt):
@@ -3951,6 +3968,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             params = self._query_params()
             try:
                 payload = self.state.workspace_git_history(params.get("path", ""), params.get("limit", 30))
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            self._send_json(payload)
+            return
+        if self.path.split("?", 1)[0] == "/api/workspace/git/tags":
+            try:
+                payload = self.state.workspace_git_tags(self._query_params().get("path", ""))
             except ValueError as exc:
                 self._send_json({"ok": False, "message": str(exc)}, status=400)
                 return

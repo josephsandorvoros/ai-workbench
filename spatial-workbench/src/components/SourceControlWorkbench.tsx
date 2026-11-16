@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { compatClient, type WorkspaceGitCommit, type WorkspaceGitOperation, type WorkspaceGitRepository, type WorkspaceGitStatus } from "../api/compatClient";
+import { compatClient, type WorkspaceGitCommit, type WorkspaceGitOperation, type WorkspaceGitRepository, type WorkspaceGitStatus, type WorkspaceGitTag } from "../api/compatClient";
 import { Icon } from "./Icon";
 
 function isLikelySecretPath(path: string) {
@@ -34,6 +34,11 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
   const [history, setHistory] = useState<WorkspaceGitCommit[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyMessage, setHistoryMessage] = useState("");
+  const [tags, setTags] = useState<WorkspaceGitTag[]>([]);
+  const [tagsBusy, setTagsBusy] = useState(false);
+  const [tagsMessage, setTagsMessage] = useState("");
+  const [releaseTagName, setReleaseTagName] = useState("");
+  const [releaseTagMessage, setReleaseTagMessage] = useState("");
 
   useEffect(() => {
     if (!active) return;
@@ -56,10 +61,12 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
       setAuthorName((current) => current || result.status.author_name);
       setAuthorEmail((current) => current || result.status.author_email);
       void loadHistory(result.status.path);
+      void loadTags(result.status.path);
       return true;
     } catch (error) {
       setStatus(null);
       setHistory([]);
+      setTags([]);
       setMessage(`Could not load Git status: ${error}`);
       return false;
     } finally {
@@ -89,6 +96,8 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
         setStatus(null);
         setHistory([]);
         setHistoryMessage("");
+        setTags([]);
+        setTagsMessage("");
       }
     } catch (error) {
       setRepositories([]);
@@ -116,6 +125,20 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
     }
   }
 
+  async function loadTags(path: string) {
+    setTagsBusy(true);
+    setTagsMessage("");
+    try {
+      const result = await compatClient.getWorkspaceGitTags(path);
+      setTags(result.tags);
+    } catch (error) {
+      setTags([]);
+      setTagsMessage(`Could not load release tags: ${error}`);
+    } finally {
+      setTagsBusy(false);
+    }
+  }
+
   function setChangeSelected(change: WorkspaceGitStatus["changes"][number], checked: boolean) {
     setSelectedPaths((current) => {
       const next = new Set(current);
@@ -125,7 +148,7 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
     });
   }
 
-  async function runOperation(action: WorkspaceGitOperation) {
+  async function runOperation(action: WorkspaceGitOperation, tagName = releaseTagName.trim()) {
     if (!status) return;
     const sensitivePaths = [...selectedPaths].filter(isLikelySecretPath);
     if (action === "commit" && selectedPaths.size === 0) {
@@ -142,6 +165,18 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
     }
     if (action === "commit_staged" && stagedCount === 0) {
       setMessage("Stage one or more files before committing.");
+      return;
+    }
+    if (action === "create_tag" && (!tagName || !releaseTagMessage.trim())) {
+      setMessage("Enter a tag name and release message.");
+      return;
+    }
+    if (action === "create_tag" && !status.clean) {
+      setMessage("Commit or discard working-tree changes before creating a release tag.");
+      return;
+    }
+    if (action === "push_tag" && !tagName) {
+      setMessage("Choose a tag to push.");
       return;
     }
     const confirmation = action === "commit"
@@ -162,7 +197,11 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
               ? `Switch from ${status.branch || "detached HEAD"} to ${selectedBranch}?`
       : action === "pull_ff"
         ? `Fetch and fast-forward ${status.branch} from ${status.upstream}?`
-        : `Push committed changes from ${status.branch} to ${status.remote_host}?`;
+        : action === "push"
+          ? `Push committed changes from ${status.branch} to ${status.remote_host}?`
+          : action === "create_tag"
+            ? `Create annotated tag ${tagName} on ${status.branch || "detached HEAD"} in ${status.path}?\n\n${releaseTagMessage.trim()}`
+            : `Push tag ${tagName} to ${status.remote_host}?`;
     if (!window.confirm(confirmation)) return;
 
     setOperationBusy(true);
@@ -184,14 +223,23 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
         } : {}),
         ...(action === "stage" ? { confirm_sensitive: stageSensitivePaths.length > 0 } : {}),
         ...(action === "switch_branch" ? { branch: selectedBranch } : {}),
+        ...(action === "create_tag" ? { tag_name: tagName, tag_message: releaseTagMessage.trim() } : {}),
+        ...(action === "push_tag" ? { tag_name: tagName } : {}),
       });
       const successMessage = ["commit", "commit_staged"].includes(action) && "commit" in result.result
         ? `Created ${result.result.commit}: ${result.result.message}`
         : action === "stage" ? "Changes staged."
           : action === "unstage" ? "Changes unstaged."
             : action === "switch_branch" ? `Switched to ${selectedBranch}.`
-              : action === "pull_ff" ? "Fast-forward pull completed." : "Push completed.";
+              : action === "pull_ff" ? "Fast-forward pull completed."
+                : action === "push" ? "Push completed."
+                  : action === "create_tag" ? `Created release tag ${tagName}.`
+                    : `Pushed release tag ${tagName} to ${status.remote_host}.`;
       if (action === "commit" || action === "commit_staged") setCommitMessage("");
+      if (action === "create_tag") {
+        setReleaseTagName("");
+        setReleaseTagMessage("");
+      }
       if (await loadStatus(status.path)) setMessage(successMessage);
     } catch (error) {
       setMessage(`Git ${action} failed: ${error}`);
@@ -431,6 +479,72 @@ export function SourceControlWorkbench({ active, initialPath, onOpenProjects }: 
                   ))}
                 </ol>
               )}
+            </section>
+            <section className="source-control-tags" aria-labelledby="source-control-tags-heading">
+              <div className="source-control-section-heading">
+                <div>
+                  <h3 id="source-control-tags-heading">Release tags</h3>
+                  <span>{tagsBusy ? "Loading..." : `${tags.length} local`}</span>
+                </div>
+                <button className="source-control-text-button" type="button" disabled={tagsBusy} onClick={() => void loadTags(status.path)}>
+                  Refresh
+                </button>
+              </div>
+              <form className="source-control-tag-form" onSubmit={(event) => {
+                event.preventDefault();
+                void runOperation("create_tag");
+              }}>
+                <label htmlFor="source-control-tag-name">Tag name</label>
+                <input
+                  id="source-control-tag-name"
+                  value={releaseTagName}
+                  onChange={(event) => setReleaseTagName(event.target.value)}
+                  placeholder="v1.0.0"
+                  maxLength={200}
+                  required
+                  disabled={!status.clean || operationBusy || statusBusy}
+                />
+                <label htmlFor="source-control-tag-message">Release message</label>
+                <textarea
+                  id="source-control-tag-message"
+                  value={releaseTagMessage}
+                  onChange={(event) => setReleaseTagMessage(event.target.value)}
+                  placeholder="Summarize this release"
+                  maxLength={2000}
+                  rows={2}
+                  required
+                  disabled={!status.clean || operationBusy || statusBusy}
+                />
+                <button className="btn secondary small" type="submit" disabled={!status.clean || operationBusy || statusBusy
+                  || !releaseTagName.trim() || !releaseTagMessage.trim()}>
+                  Create annotated tag
+                </button>
+              </form>
+              {tagsMessage && <p className="source-control-message error" role="status">{tagsMessage}</p>}
+              {tags.length ? (
+                <ul className="source-control-tag-list">
+                  {tags.map((tag) => (
+                    <li key={tag.name}>
+                      <div>
+                        <strong>{tag.name}</strong>
+                        <span>{tag.subject || "No release message"}</span>
+                        {tag.commit && <code>{tag.commit}</code>}
+                      </div>
+                      <button
+                        className="btn secondary small"
+                        type="button"
+                        disabled={!status.remote_host || operationBusy || statusBusy}
+                        onClick={() => void runOperation("push_tag", tag.name)}
+                        title={!status.remote_host ? "Configure an origin remote before pushing tags." : undefined}
+                      >
+                        Push tag
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : !tagsBusy && !tagsMessage ? (
+                <p className="source-control-note">No release tags yet.</p>
+              ) : null}
             </section>
           </div>
         </div>

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import git_remote
@@ -131,6 +132,58 @@ class GitRemoteTests(unittest.TestCase):
             self.assertEqual(len(history["commits"][0]["commit"]), 40)
             with self.assertRaisesRegex(git_remote.GitRemoteError, "between 1 and 100"):
                 git_remote.repository_history(workspace, "projects/demo", 101)
+
+    def test_create_annotated_tag_requires_clean_tree_and_lists_release_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            (workspace / "projects").mkdir(parents=True)
+            repo = self.make_repository(workspace)
+
+            created = git_remote.create_annotated_tag(
+                workspace, "projects/demo", "v1.2.3", "Release 1.2.3\nHighlights",
+            )
+            self.assertEqual(created["tag"], "v1.2.3")
+            self.assertEqual(self.run_git("-C", repo, "cat-file", "-t", "refs/tags/v1.2.3"), "tag")
+            tags = git_remote.repository_tags(workspace, "projects/demo")["tags"]
+            self.assertEqual(tags, [{
+                "name": "v1.2.3",
+                "subject": "Release 1.2.3 Highlights",
+                "commit": self.run_git("-C", repo, "rev-parse", "--short", "HEAD"),
+            }])
+
+            with self.assertRaisesRegex(git_remote.GitRemoteError, "already exists"):
+                git_remote.create_annotated_tag(workspace, "projects/demo", "v1.2.3", "Duplicate")
+            with self.assertRaisesRegex(git_remote.GitRemoteError, "valid Git tag name"):
+                git_remote.create_annotated_tag(workspace, "projects/demo", "not a tag", "Invalid")
+
+            (repo / "uncommitted.txt").write_text("pending\n", encoding="utf-8")
+            with self.assertRaisesRegex(git_remote.GitRemoteError, "working-tree changes"):
+                git_remote.create_annotated_tag(workspace, "projects/demo", "v1.2.4", "Release 1.2.4")
+
+    def test_push_tag_pushes_only_the_selected_tag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            (workspace / "projects").mkdir(parents=True)
+            repo = self.make_repository(workspace)
+            remote = Path(directory) / "remote.git"
+            self.run_git("init", "--bare", remote)
+            self.run_git("-C", repo, "remote", "add", "origin", remote)
+            git_remote.create_annotated_tag(workspace, "projects/demo", "v1.2.3", "Release 1.2.3")
+
+            with patch.object(
+                git_remote,
+                "_origin_for_operation",
+                return_value=(SimpleNamespace(url=str(remote), host="forgejo.example"), None),
+            ):
+                result = git_remote.push_tag(workspace, "projects/demo", "v1.2.3")
+
+            self.assertEqual(result["tag"], "v1.2.3")
+            self.assertEqual(
+                self.run_git("--git-dir", remote, "for-each-ref", "--format=%(refname)", "refs"),
+                "refs/tags/v1.2.3",
+            )
+            with self.assertRaisesRegex(git_remote.GitRemoteError, "does not exist"):
+                git_remote.push_tag(workspace, "projects/demo", "v9.9.9")
 
     def test_commit_staged_preserves_unstaged_files(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1567,6 +1567,33 @@ class ApiContractTests(unittest.TestCase):
             self.assertTrue(committed["ok"])
             self.assertEqual(committed["result"]["message"], "Update README")
 
+    def test_workspace_git_tag_requires_confirmation_and_is_listed(self):
+        with contract_server() as server:
+            repo = server.workspace_root / "projects" / "git-tags"
+            repo.mkdir(parents=True)
+            subprocess.run(["git", "init", "-b", "main", str(repo)], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "API Test"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "api-test@example.invalid"], capture_output=True, check=True)
+            (repo / "README.md").write_text("# Git tags\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "README.md"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], capture_output=True, check=True)
+
+            with self.assertRaises(HTTPError) as raised:
+                server.post_json("/api/workspace/git/operation", {
+                    "action": "create_tag", "path": "projects/git-tags",
+                    "tag_name": "v1.2.3", "tag_message": "Release 1.2.3",
+                })
+            self.assertEqual(raised.exception.code, 400)
+
+            _, result = server.post_json("/api/workspace/git/operation", {
+                "action": "create_tag", "confirm": True, "path": "projects/git-tags",
+                "tag_name": "v1.2.3", "tag_message": "Release 1.2.3",
+            })
+            self.assertEqual(result["result"]["tag"], "v1.2.3")
+            _, listed = server.get_json("/api/workspace/git/tags", {"path": "projects/git-tags"})
+            self.assertEqual(listed["tags"][0]["name"], "v1.2.3")
+            self.assertEqual(listed["tags"][0]["subject"], "Release 1.2.3")
+
     def test_workspace_git_index_branch_and_history_operations(self):
         with contract_server() as server:
             repo = server.workspace_root / "projects" / "git-workflows"

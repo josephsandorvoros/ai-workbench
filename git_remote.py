@@ -440,6 +440,28 @@ def repository_history(workspace_root, value, limit=30):
     }
 
 
+def repository_tags(workspace_root, value):
+    repo = resolve_workspace_repository(workspace_root, value)
+    output = _run_git([
+        "-C", repo, "for-each-ref",
+        "--format=%(refname:strip=2)%00%(contents:subject)",
+        "refs/tags",
+    ])
+    tags = []
+    for record in output.splitlines():
+        fields = record.split("\0", 1)
+        if len(fields) != 2:
+            raise GitRemoteError("Could not read repository tags")
+        name, subject = fields
+        ref = f"refs/tags/{name}"
+        commit_ref = f"{ref}^{{commit}}"
+        commit = _run_git(["-C", repo, "rev-parse", "--short", commit_ref]) if _git_returns(
+            ["-C", repo, "rev-parse", "--verify", commit_ref]
+        ) else ""
+        tags.append({"name": name, "subject": subject, "commit": commit})
+    return {"path": repo.relative_to(Path(workspace_root).resolve()).as_posix(), "tags": tags}
+
+
 def _git_returns(args):
     return subprocess.run(["git", *map(str, args)], capture_output=True, timeout=10).returncode == 0
 
@@ -616,6 +638,57 @@ def push_current_branch(workspace_root, value, credentials=None):
     if not status["upstream"]:
         _run_git(["-C", repo, "branch", "--set-upstream-to", f"origin/{branch}", branch])
     return repository_status(workspace_root, status["path"])
+
+
+def create_annotated_tag(workspace_root, value, tag_name, message):
+    repo = resolve_workspace_repository(workspace_root, value)
+    status = repository_status(workspace_root, str(repo.relative_to(Path(workspace_root).resolve())))
+    tag_name = str(tag_name or "").strip()
+    message = str(message or "").strip()
+    if not tag_name or len(tag_name) > 200 or not _git_returns(
+        ["-C", repo, "check-ref-format", f"refs/tags/{tag_name}"]
+    ):
+        raise GitRemoteError("Enter a valid Git tag name")
+    if not message or len(message) > 2000 or any(
+        ord(char) < 32 and char not in "\t\n\r" for char in message
+    ):
+        raise GitRemoteError("Enter a tag message up to 2,000 characters")
+    if not status["clean"]:
+        raise GitRemoteError("Commit or discard working-tree changes before creating a release tag")
+    if not _git_returns(["-C", repo, "rev-parse", "--verify", "HEAD"]):
+        raise GitRemoteError("Create an initial commit before tagging a release")
+    if _git_returns(["-C", repo, "show-ref", "--verify", "--quiet", f"refs/tags/{tag_name}"]):
+        raise GitRemoteError(f"Tag {tag_name} already exists")
+    if not status["author_name"] or not status["author_email"]:
+        raise GitRemoteError("Configure Git user.name and user.email before creating an annotated tag")
+    _run_git([
+        "-C", repo,
+        "-c", f"user.name={status['author_name']}",
+        "-c", f"user.email={status['author_email']}",
+        "tag", "--annotate", "--message", message, "--", tag_name, "HEAD",
+    ])
+    return {
+        "path": status["path"],
+        "tag": tag_name,
+        "commit": _run_git(["-C", repo, "rev-parse", "--short", "HEAD"]),
+        "message": message,
+    }
+
+
+def push_tag(workspace_root, value, tag_name, credentials=None):
+    repo = resolve_workspace_repository(workspace_root, value)
+    status = repository_status(workspace_root, str(repo.relative_to(Path(workspace_root).resolve())))
+    tag_name = str(tag_name or "").strip()
+    if not tag_name or len(tag_name) > 200 or not _git_returns(
+        ["-C", repo, "check-ref-format", f"refs/tags/{tag_name}"]
+    ):
+        raise GitRemoteError("Choose a valid local Git tag")
+    if not _git_returns(["-C", repo, "show-ref", "--verify", "--quiet", f"refs/tags/{tag_name}"]):
+        raise GitRemoteError(f"Local tag {tag_name} does not exist")
+    remote, auth = _origin_for_operation(repo, credentials, require_credentials=True)
+    ref = f"refs/tags/{tag_name}"
+    _run_git(["-C", repo, "push", remote.url, f"{ref}:{ref}"], credentials=auth, timeout=300)
+    return {"path": status["path"], "tag": tag_name, "remote_host": remote.host}
 
 
 def inspect_ssh_credentials(host, private_key, known_hosts):
