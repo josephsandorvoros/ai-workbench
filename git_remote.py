@@ -313,6 +313,7 @@ def repository_status(workspace_root, value):
     branch = _run_git(["-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD"]) if _git_returns(
         ["-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD"]
     ) else ""
+    branches = _run_git(["-C", repo, "for-each-ref", "--format=%(refname:short)", "refs/heads"]).splitlines()
     try:
         upstream = _run_git(["-C", repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
     except GitRemoteError:
@@ -339,7 +340,8 @@ def repository_status(workspace_root, value):
                 index += 1
         changes.append({"path": path, "related_path": related_path, "status": code,
                         "conflicted": "U" in code or code == "AA" or code == "DD",
-                        "staged": code[0] != " " and code[0] != "?"})
+                        "staged": code[0] != " " and code[0] != "?",
+                        "unstaged": code[1] != " "})
     remote_url = ""
     remote = None
     try:
@@ -356,6 +358,7 @@ def repository_status(workspace_root, value):
     return {
         "path": repo.relative_to(Path(workspace_root).resolve()).as_posix(),
         "branch": branch,
+        "branches": branches,
         "upstream": upstream,
         "ahead": ahead,
         "behind": behind,
@@ -368,8 +371,130 @@ def repository_status(workspace_root, value):
     }
 
 
+def repository_history(workspace_root, value, limit=30):
+    repo = resolve_workspace_repository(workspace_root, value)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise GitRemoteError("Commit history limit must be between 1 and 100") from exc
+    if not 1 <= limit <= 100:
+        raise GitRemoteError("Commit history limit must be between 1 and 100")
+    output = _run_git([
+        "-C", repo, "log", f"-n{limit}",
+        "--format=%H%x00%s%x00%an%x00%aI",
+    ])
+    commits = []
+    for record in output.splitlines():
+        fields = record.split("\0", 3)
+        if len(fields) != 4:
+            raise GitRemoteError("Could not read repository commit history")
+        commit, subject, author, authored_at = fields
+        commits.append({
+            "commit": commit,
+            "subject": subject,
+            "author": author,
+            "authored_at": authored_at,
+        })
+    return {
+        "path": repo.relative_to(Path(workspace_root).resolve()).as_posix(),
+        "commits": commits,
+    }
+
+
 def _git_returns(args):
     return subprocess.run(["git", *map(str, args)], capture_output=True, timeout=10).returncode == 0
+
+
+def _validated_changed_paths(status, paths, *, staged=None, unstaged=None):
+    if not isinstance(paths, list) or not paths or len(paths) > 500:
+        raise GitRemoteError("Select one or more changed files")
+    changes = {}
+    for change in status["changes"]:
+        changes[change["path"]] = change
+        if change["related_path"]:
+            changes[change["related_path"]] = change
+    selected = []
+    for raw_path in paths:
+        path = str(raw_path or "")
+        if not path or Path(path).is_absolute() or any(part in {"", ".", "..", ".git"} for part in Path(path).parts):
+            raise GitRemoteError("Selected Git path is invalid")
+        if path not in changes:
+            raise GitRemoteError("A selected path is no longer changed; refresh Git status")
+        change = changes[path]
+        if change and change["conflicted"]:
+            raise GitRemoteError("Resolve conflicted files before changing the index")
+        if staged is not None and (change is None or change["staged"] is not staged):
+            raise GitRemoteError("A selected file no longer has the expected staged state; refresh Git status")
+        if unstaged is not None and (change is None or change["unstaged"] is not unstaged):
+            raise GitRemoteError("A selected file no longer has the expected working-tree state; refresh Git status")
+        if path not in selected:
+            selected.append(path)
+    return selected
+
+
+def stage_paths(workspace_root, value, paths):
+    repo = resolve_workspace_repository(workspace_root, value)
+    status = repository_status(workspace_root, str(repo.relative_to(Path(workspace_root).resolve())))
+    selected = _validated_changed_paths(status, paths, unstaged=True)
+    _run_git(["-C", repo, "add", "-A", "--", *[f":(literal){path}" for path in selected]], timeout=60)
+    return repository_status(workspace_root, status["path"])
+
+
+def unstage_paths(workspace_root, value, paths):
+    repo = resolve_workspace_repository(workspace_root, value)
+    status = repository_status(workspace_root, str(repo.relative_to(Path(workspace_root).resolve())))
+    selected = _validated_changed_paths(status, paths, staged=True)
+    pathspecs = [f":(literal){path}" for path in selected]
+    if _git_returns(["-C", repo, "rev-parse", "--verify", "HEAD"]):
+        _run_git(["-C", repo, "reset", "-q", "HEAD", "--", *pathspecs], timeout=60)
+    else:
+        _run_git(["-C", repo, "rm", "--cached", "-r", "--", *pathspecs], timeout=60)
+    return repository_status(workspace_root, status["path"])
+
+
+def switch_branch(workspace_root, value, branch):
+    repo = resolve_workspace_repository(workspace_root, value)
+    status = repository_status(workspace_root, str(repo.relative_to(Path(workspace_root).resolve())))
+    branch = str(branch or "")
+    if not branch or not _SAFE_BRANCH.fullmatch(branch) or branch not in status["branches"]:
+        raise GitRemoteError("Choose an existing local branch")
+    if not status["clean"]:
+        raise GitRemoteError("Commit, stage, or discard working-tree changes before switching branches")
+    _run_git(["-C", repo, "switch", "--", branch], timeout=60)
+    return repository_status(workspace_root, status["path"])
+
+
+def commit_staged(workspace_root, value, message, author_name, author_email):
+    repo = resolve_workspace_repository(workspace_root, value)
+    status = repository_status(workspace_root, str(repo.relative_to(Path(workspace_root).resolve())))
+    message = str(message or "").strip()
+    author_name = str(author_name or "").strip()
+    author_email = str(author_email or "").strip()
+    if not message or len(message) > 2000 or "\n" in message:
+        raise GitRemoteError("Enter a one-line commit message up to 2,000 characters")
+    if not author_name or len(author_name) > 200 or any(ord(char) < 32 for char in author_name):
+        raise GitRemoteError("Enter a valid commit author name")
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+", author_email) or len(author_email) > 254:
+        raise GitRemoteError("Enter a valid commit author email")
+    if any(change["conflicted"] for change in status["changes"]):
+        raise GitRemoteError("Resolve conflicted files before committing")
+    staged = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--quiet"], capture_output=True, timeout=10)
+    if staged.returncode == 0:
+        raise GitRemoteError("Stage one or more files before committing")
+    if staged.returncode != 1:
+        raise GitRemoteError("Could not inspect staged changes")
+    staged_paths = _run_git_bytes(["-C", repo, "diff", "--cached", "--name-only", "-z"]).split(b"\0")
+    files = [os.fsdecode(path) for path in staged_paths if path]
+    _run_git([
+        "-C", repo, "-c", f"user.name={author_name}", "-c", f"user.email={author_email}",
+        "commit", "-m", message,
+    ], timeout=60)
+    return {
+        "commit": _run_git(["-C", repo, "rev-parse", "--short", "HEAD"]),
+        "message": message,
+        "path": status["path"],
+        "files": files,
+    }
 
 
 def commit_paths(workspace_root, value, paths, message, author_name, author_email):

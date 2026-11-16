@@ -11,6 +11,7 @@ export type IconName =
   | "hexagon"
   | "bolt"
   | "board"
+  | "branch"
   | "file"
   | "image"
   | "upload"
@@ -44,6 +45,7 @@ const PATHS: Record<IconName, string[]> = {
   bolt: ["M13 2 L4 14 H10 L9 22 L20 9 H13 Z"],
   // Reuses the taskbar "board" glyph so the two always match.
   board: ["M4 4h16v16H4V4Zm4 4h3v3H8V8Zm5 5h3v3h-3v-3Z"],
+  branch: ["M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm12 12a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM6 7v14m0-12c0 3 12 3 12 3v3"],
   file: ["M6 2 H14 L18 6 V22 H6 Z", "M14 2 V6 H18"],
   image: ["M3 5 H21 V19 H3 Z", "M3 16 l5-5 4 4 3-3 6 6", "M15.5 8 a1.5 1.5 0 1 0 0 3 a1.5 1.5 0 1 0 0 -3"],
   upload: ["M12 16 V4", "M7 9 l5-5 5 5", "M4 16 V20 H20 V16"],

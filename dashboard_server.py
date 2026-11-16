@@ -1654,13 +1654,17 @@ class DashboardState:
     def workspace_git_status(self, path):
         return {"ok": True, "status": git_remote.repository_status(self.workspace_root, path)}
 
+    def workspace_git_history(self, path, limit=30):
+        return {"ok": True, **git_remote.repository_history(self.workspace_root, path, limit)}
+
     def workspace_git_operation(self, body):
         if not isinstance(body, dict):
             raise ValueError("Git operation must be an object")
         action = str(body.get("action") or "").strip()
         path = str(body.get("path") or "")
-        if action not in {"commit", "pull_ff", "push"}:
-            raise ValueError("Choose commit, pull_ff, or push")
+        allowed_actions = {"commit", "commit_staged", "stage", "unstage", "switch_branch", "pull_ff", "push"}
+        if action not in allowed_actions:
+            raise ValueError("Choose a supported Git operation")
         if body.get("confirm") is not True:
             raise ValueError(f"Confirm the Git {action} operation")
         status = git_remote.repository_status(self.workspace_root, path)
@@ -1674,6 +1678,31 @@ class DashboardState:
                 self.workspace_root, status["path"], body.get("paths"), body.get("message"),
                 body.get("author_name"), body.get("author_email"),
             )
+        elif action == "commit_staged":
+            staged_paths = [
+                git_path
+                for change in status["changes"] if change["staged"]
+                for git_path in (change["path"], change["related_path"])
+                if git_path
+            ]
+            sensitive_paths = [git_path for git_path in staged_paths if self._looks_sensitive_git_path(git_path)]
+            if sensitive_paths and body.get("confirm_sensitive") is not True:
+                raise ValueError("Staged paths may contain secrets; explicitly confirm_sensitive after reviewing them")
+            result = git_remote.commit_staged(
+                self.workspace_root, status["path"], body.get("message"),
+                body.get("author_name"), body.get("author_email"),
+            )
+        elif action == "stage":
+            selected_paths = body.get("paths") if isinstance(body.get("paths"), list) else []
+            sensitive_paths = [str(git_path) for git_path in selected_paths if self._looks_sensitive_git_path(str(git_path))]
+            if sensitive_paths and body.get("confirm_sensitive") is not True:
+                raise ValueError("Selected paths may contain secrets; explicitly confirm_sensitive after reviewing them")
+            result = git_remote.stage_paths(self.workspace_root, status["path"], selected_paths)
+        elif action == "unstage":
+            selected_paths = body.get("paths") if isinstance(body.get("paths"), list) else []
+            result = git_remote.unstage_paths(self.workspace_root, status["path"], selected_paths)
+        elif action == "switch_branch":
+            result = git_remote.switch_branch(self.workspace_root, status["path"], body.get("branch"))
         elif action == "pull_ff":
             result = git_remote.pull_fast_forward(self.workspace_root, status["path"], credentials)
         else:
@@ -3902,6 +3931,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path.split("?", 1)[0] == "/api/workspace/git/status":
             try:
                 payload = self.state.workspace_git_status(self._query_params().get("path", ""))
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            self._send_json(payload)
+            return
+        if self.path.split("?", 1)[0] == "/api/workspace/git/history":
+            params = self._query_params()
+            try:
+                payload = self.state.workspace_git_history(params.get("path", ""), params.get("limit", 30))
             except ValueError as exc:
                 self._send_json({"ok": False, "message": str(exc)}, status=400)
                 return

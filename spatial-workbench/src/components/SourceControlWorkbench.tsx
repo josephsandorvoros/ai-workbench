@@ -1,0 +1,390 @@
+import { useEffect, useState } from "react";
+import { compatClient, type WorkspaceGitCommit, type WorkspaceGitOperation, type WorkspaceGitStatus } from "../api/compatClient";
+import { Icon } from "./Icon";
+
+function isLikelySecretPath(path: string) {
+  const name = path.split("/").at(-1)?.toLowerCase() || "";
+  return name.startsWith(".env") || name.includes("secret") || name.includes("credential")
+    || [".pem", ".key", ".p12", ".pfx"].some((extension) => name.endsWith(extension));
+}
+
+function changedPaths(status: WorkspaceGitStatus) {
+  return status.changes.flatMap((change) => [change.path, ...(change.related_path ? [change.related_path] : [])]);
+}
+
+export function SourceControlWorkbench({ active, initialPath }: { active: boolean; initialPath: string }) {
+  const [repositoryPath, setRepositoryPath] = useState(initialPath);
+  const [status, setStatus] = useState<WorkspaceGitStatus | null>(null);
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [operationBusy, setOperationBusy] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
+  const [commitMessage, setCommitMessage] = useState("");
+  const [authorName, setAuthorName] = useState("");
+  const [authorEmail, setAuthorEmail] = useState("");
+  const [message, setMessage] = useState("");
+  const [selectedBranch, setSelectedBranch] = useState("");
+  const [history, setHistory] = useState<WorkspaceGitCommit[]>([]);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyMessage, setHistoryMessage] = useState("");
+
+  useEffect(() => {
+    if (!active || !initialPath.trim()) return;
+    setRepositoryPath(initialPath);
+    void loadStatus(initialPath);
+  }, [active, initialPath]);
+
+  async function loadStatus(path = repositoryPath.trim()): Promise<boolean> {
+    if (!path) {
+      setMessage("Enter a repository path to inspect its changes.");
+      return false;
+    }
+    setStatusBusy(true);
+    setMessage("");
+    try {
+      const result = await compatClient.getWorkspaceGitStatus(path);
+      setStatus(result.status);
+      setRepositoryPath(result.status.path);
+      setSelectedPaths(new Set());
+      setSelectedBranch(result.status.branch);
+      setAuthorName((current) => current || result.status.author_name);
+      setAuthorEmail((current) => current || result.status.author_email);
+      void loadHistory(result.status.path);
+      return true;
+    } catch (error) {
+      setStatus(null);
+      setHistory([]);
+      setMessage(`Could not load Git status: ${error}`);
+      return false;
+    } finally {
+      setStatusBusy(false);
+    }
+  }
+
+  async function loadHistory(path: string) {
+    setHistoryBusy(true);
+    setHistoryMessage("");
+    try {
+      const result = await compatClient.getWorkspaceGitHistory(path);
+      setHistory(result.commits);
+    } catch (error) {
+      setHistory([]);
+      setHistoryMessage(`Could not load commit history: ${error}`);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
+  function setChangeSelected(change: WorkspaceGitStatus["changes"][number], checked: boolean) {
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      if (checked) next.add(change.path);
+      else next.delete(change.path);
+      return next;
+    });
+  }
+
+  async function runOperation(action: WorkspaceGitOperation) {
+    if (!status) return;
+    const sensitivePaths = [...selectedPaths].filter(isLikelySecretPath);
+    if (action === "commit" && selectedPaths.size === 0) {
+      setMessage("Select at least one changed file to commit.");
+      return;
+    }
+    if (action === "stage" && stagePaths.length === 0) {
+      setMessage("Select one or more unstaged files to stage.");
+      return;
+    }
+    if (action === "unstage" && unstagePaths.length === 0) {
+      setMessage("Select one or more staged files to unstage.");
+      return;
+    }
+    if (action === "commit_staged" && stagedCount === 0) {
+      setMessage("Stage one or more files before committing.");
+      return;
+    }
+    const confirmation = action === "commit"
+      ? `${selectedPaths.size} selected path(s) in ${status.path}${sensitivePaths.length
+        ? ` include likely secret files: ${sensitivePaths.join(", ")}. Verify these are safe to commit.\n\n`
+        : "?\n\n"}Continue?`
+      : action === "stage"
+        ? `Stage ${stagePaths.length} selected path(s) in ${status.path}${stageSensitivePaths.length
+          ? `, including likely secret files: ${stageSensitivePaths.join(", ")}. Verify these are safe to commit.\n\n`
+          : "?\n\n"}Continue?`
+        : action === "unstage"
+          ? `Unstage ${unstagePaths.length} selected path(s) in ${status.path}?\n\nContinue?`
+          : action === "commit_staged"
+            ? `Commit all staged changes in ${status.path}${stagedSensitivePaths.length
+              ? `, including likely secret files: ${stagedSensitivePaths.join(", ")}. Verify these are safe to commit.\n\n`
+              : "?\n\n"}Continue?`
+            : action === "switch_branch"
+              ? `Switch from ${status.branch || "detached HEAD"} to ${selectedBranch}?`
+      : action === "pull_ff"
+        ? `Fetch and fast-forward ${status.branch} from ${status.upstream}?`
+        : `Push committed changes from ${status.branch} to ${status.remote_host}?`;
+    if (!window.confirm(confirmation)) return;
+
+    setOperationBusy(true);
+    setMessage("");
+    try {
+      const result = await compatClient.runWorkspaceGitOperation({
+        action,
+        path: status.path,
+        confirm: true,
+        ...(["commit", "stage", "unstage"].includes(action) ? {
+          paths: action === "stage" ? stagePaths : action === "unstage" ? unstagePaths : [...selectedPaths],
+        } : {}),
+        ...(["commit", "commit_staged"].includes(action) ? {
+          ...(action === "commit" ? { paths: [...selectedPaths] } : {}),
+          message: commitMessage,
+          author_name: authorName,
+          author_email: authorEmail,
+          confirm_sensitive: action === "commit_staged" ? stagedSensitivePaths.length > 0 : sensitivePaths.length > 0,
+        } : {}),
+        ...(action === "stage" ? { confirm_sensitive: stageSensitivePaths.length > 0 } : {}),
+        ...(action === "switch_branch" ? { branch: selectedBranch } : {}),
+      });
+      const successMessage = ["commit", "commit_staged"].includes(action) && "commit" in result.result
+        ? `Created ${result.result.commit}: ${result.result.message}`
+        : action === "stage" ? "Changes staged."
+          : action === "unstage" ? "Changes unstaged."
+            : action === "switch_branch" ? `Switched to ${selectedBranch}.`
+              : action === "pull_ff" ? "Fast-forward pull completed." : "Push completed.";
+      if (action === "commit" || action === "commit_staged") setCommitMessage("");
+      if (await loadStatus(status.path)) setMessage(successMessage);
+    } catch (error) {
+      setMessage(`Git ${action} failed: ${error}`);
+    } finally {
+      setOperationBusy(false);
+    }
+  }
+
+  const stagedChanges = status?.changes.filter((change) => change.staged) ?? [];
+  const unstagedChanges = status?.changes.filter((change) => change.unstaged) ?? [];
+  const stagedCount = stagedChanges.length;
+  const unstagedCount = unstagedChanges.length;
+  const selectedSensitive = [...selectedPaths].some(isLikelySecretPath);
+  const selectedUnstagedChanges = unstagedChanges.filter((change) => selectedPaths.has(change.path));
+  const selectedStagedChanges = stagedChanges.filter((change) => selectedPaths.has(change.path));
+  const stagePaths = selectedUnstagedChanges.flatMap((change) => [change.path, ...(change.related_path ? [change.related_path] : [])]);
+  const unstagePaths = selectedStagedChanges.flatMap((change) => [change.path, ...(change.related_path ? [change.related_path] : [])]);
+  const stageSensitivePaths = stagePaths.filter(isLikelySecretPath);
+  const stagedSensitivePaths = stagedChanges.flatMap((change) => [change.path, ...(change.related_path ? [change.related_path] : [])]).filter(isLikelySecretPath);
+
+  return (
+    <section className="source-control-workbench" aria-label="Source Control">
+      <header className="source-control-header">
+        <div>
+          <p className="eyebrow">Repository workspace</p>
+          <h2>Source Control</h2>
+          <p>Review changes, choose what to commit, and sync with the remote.</p>
+        </div>
+        <form className="source-control-repository-form" onSubmit={(event) => {
+          event.preventDefault();
+          void loadStatus();
+        }}>
+          <label htmlFor="source-control-path">Repository path</label>
+          <div>
+            <input
+              id="source-control-path"
+              value={repositoryPath}
+              onChange={(event) => setRepositoryPath(event.target.value)}
+              placeholder="projects/my-repository"
+              required
+            />
+            <button className="btn secondary small" type="submit" disabled={statusBusy}>
+              <Icon name="refresh" size={14} /> {statusBusy ? "Checking..." : "Refresh"}
+            </button>
+          </div>
+        </form>
+      </header>
+
+      {status ? (
+        <div className="source-control-body">
+          <section className="source-control-repo-summary" aria-label="Repository status">
+            <div className="source-control-branch">
+              <Icon name="branch" size={17} />
+              <strong>{status.branch || "detached HEAD"}</strong>
+              <span>{status.path}</span>
+            </div>
+            <div className="source-control-sync">
+              <span>{status.upstream || "No upstream configured"}</span>
+              {status.upstream && <span>{status.ahead ?? 0} ahead · {status.behind ?? 0} behind</span>}
+              <span>{status.remote_host ? `origin · ${status.remote_transport} · ${status.remote_host}` : "No supported origin remote"}</span>
+            </div>
+            <div className="source-control-sync-actions">
+              <label className="source-control-branch-picker">
+                <select
+                  aria-label="Switch branch"
+                  value={selectedBranch}
+                  onChange={(event) => setSelectedBranch(event.target.value)}
+                  disabled={status.branches.length < 2 || !status.clean || operationBusy || statusBusy}
+                >
+                  {status.branches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                </select>
+              </label>
+              <button
+                className="btn secondary small"
+                type="button"
+                disabled={operationBusy || statusBusy || !status.clean || !selectedBranch || selectedBranch === status.branch}
+                onClick={() => void runOperation("switch_branch")}
+              >
+                Switch
+              </button>
+              <button
+                className="btn secondary small"
+                type="button"
+                disabled={operationBusy || statusBusy || !status.upstream || !status.clean}
+                onClick={() => void runOperation("pull_ff")}
+                title={!status.clean ? "Commit or stash working-tree changes before pulling." : undefined}
+              >
+                Pull
+              </button>
+              <button
+                className="btn secondary small"
+                type="button"
+                disabled={operationBusy || statusBusy || !status.remote_host || !status.branch}
+                onClick={() => void runOperation("push")}
+              >
+                Push
+              </button>
+            </div>
+          </section>
+
+          <div className="source-control-content">
+            <section className="source-control-changes" aria-labelledby="source-control-changes-heading">
+              <div className="source-control-section-heading">
+                <div>
+                  <h3 id="source-control-changes-heading">Changes</h3>
+                  <span>{status.changes.length} file{status.changes.length === 1 ? "" : "s"}</span>
+                </div>
+                {status.changes.length > 0 && <div>
+                  <button className="source-control-text-button" type="button" onClick={() => setSelectedPaths(new Set(changedPaths(status)))}>
+                    Select all
+                  </button>
+                  <button className="source-control-text-button" type="button" onClick={() => setSelectedPaths(new Set())}>
+                    Clear
+                  </button>
+                </div>}
+              </div>
+              {status.changes.length ? (
+                <>
+                  {selectedSensitive && <p className="source-control-warning" role="alert">
+                    Selected filenames may contain secrets. Review their contents before committing.
+                  </p>}
+                  {stagedCount > 0 && <p className="source-control-note">
+                    {stagedCount} staged · {unstagedCount} unstaged.
+                  </p>}
+                  <div className="source-control-index-actions">
+                    <button className="btn secondary small" type="button" disabled={operationBusy || stagePaths.length === 0} onClick={() => void runOperation("stage")}>
+                      Stage selected{stagePaths.length ? ` (${stagePaths.length})` : ""}
+                    </button>
+                    <button className="btn secondary small" type="button" disabled={operationBusy || unstagePaths.length === 0} onClick={() => void runOperation("unstage")}>
+                      Unstage selected{unstagePaths.length ? ` (${unstagePaths.length})` : ""}
+                    </button>
+                  </div>
+                  <ul className="source-control-change-list">
+                    {status.changes.map((change) => (
+                      <li key={`${change.path}:${change.related_path || ""}`}>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={selectedPaths.has(change.path)}
+                            onChange={(event) => setChangeSelected(change, event.target.checked)}
+                            disabled={change.conflicted}
+                          />
+                          <span className="source-control-status-code">{change.status}</span>
+                          <span className="source-control-change-path">
+                            <span>{change.path}</span>
+                            {change.related_path && <small>from {change.related_path}</small>}
+                            {change.conflicted && <small className="source-control-conflict">conflict</small>}
+                          </span>
+                          <span className="source-control-change-state">
+                            {change.staged && change.unstaged ? "staged + modified" : change.staged ? "staged" : "modified"}
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <div className="source-control-clean">
+                  <span aria-hidden="true">✓</span>
+                  <strong>Working tree clean</strong>
+                  <p>No changes to commit.</p>
+                </div>
+              )}
+            </section>
+
+            <form className="source-control-commit" onSubmit={(event) => {
+              event.preventDefault();
+              void runOperation("commit_staged");
+            }}>
+              <div className="source-control-section-heading">
+                <div>
+                  <h3>Commit</h3>
+                  <span>{stagedCount} staged</span>
+                </div>
+              </div>
+              <label htmlFor="source-control-message">Message</label>
+              <textarea
+                id="source-control-message"
+                value={commitMessage}
+                onChange={(event) => setCommitMessage(event.target.value)}
+                placeholder="Describe this change"
+                maxLength={2000}
+                rows={3}
+                disabled={status.changes.length === 0}
+              />
+              <details className="source-control-author" open={!authorName || !authorEmail}>
+                <summary>Commit author</summary>
+                <label>Name<input value={authorName} onChange={(event) => setAuthorName(event.target.value)} required /></label>
+                <label>Email<input type="email" value={authorEmail} onChange={(event) => setAuthorEmail(event.target.value)} required /></label>
+              </details>
+              <button
+                className="btn primary source-control-commit-button"
+                type="submit"
+                disabled={operationBusy || statusBusy || !commitMessage.trim() || !authorName.trim() || !authorEmail.trim()
+                  || stagedCount === 0 || status.changes.some((change) => change.conflicted)}
+              >
+                {operationBusy ? "Working..." : `Commit staged${stagedCount ? ` (${stagedCount})` : ""}`}
+              </button>
+            </form>
+            <section className="source-control-history" aria-labelledby="source-control-history-heading">
+              <div className="source-control-section-heading">
+                <div>
+                  <h3 id="source-control-history-heading">Commit history</h3>
+                  <span>{historyBusy ? "Loading..." : `${history.length} recent`}</span>
+                </div>
+                <button className="source-control-text-button" type="button" disabled={historyBusy} onClick={() => void loadHistory(status.path)}>
+                  Refresh
+                </button>
+              </div>
+              {historyMessage && <p className="source-control-message error" role="status">{historyMessage}</p>}
+              {!historyBusy && !historyMessage && history.length === 0 ? (
+                <p className="source-control-note">No commits yet.</p>
+              ) : (
+                <ol className="source-control-history-list">
+                  {history.map((commit) => (
+                    <li key={commit.commit}>
+                      <code>{commit.commit.slice(0, 8)}</code>
+                      <span className="source-control-history-subject">{commit.subject}</span>
+                      <span className="source-control-history-author">{commit.author}</span>
+                      <time dateTime={commit.authored_at}>{new Date(commit.authored_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</time>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </section>
+          </div>
+        </div>
+      ) : (
+        <div className="source-control-empty">
+          <Icon name="branch" size={26} />
+          <h3>Open a repository</h3>
+          <p>Enter a repository path under your workspace, or open Source Control from a folder in Projects.</p>
+        </div>
+      )}
+      {message && <p className={`source-control-message ${message.startsWith("Could not") || message.startsWith("Git ") ? "error" : ""}`} role="status">{message}</p>}
+    </section>
+  );
+}

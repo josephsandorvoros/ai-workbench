@@ -1,7 +1,7 @@
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { updateAgentProvider, useAgentProvider } from "../agent/agentStore";
-import { compatClient, type AppPreviewSession, type CapabilityState, type GitHostConnection, type GitProvider, type WorkspaceEntry, type WorkspaceGitPreview, type WorkspaceGitStatus, type WorkspaceGitOperation } from "../api/compatClient";
+import { compatClient, type AppPreviewSession, type CapabilityState, type GitHostConnection, type GitProvider, type WorkspaceEntry, type WorkspaceGitPreview } from "../api/compatClient";
 import { formatWorkspaceJson, workspaceFileKind, WORKSPACE_PREVIEW_MAX_BYTES } from "../agent/workspacePreview";
 import { DEFAULT_HTML_ARTIFACT } from "../agent/htmlArtifact";
 import { prepareAttachment } from "../agent/attachments";
@@ -46,12 +46,6 @@ function formatBytes(bytes: number | undefined) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function isLikelySecretPath(path: string) {
-  const name = path.split("/").at(-1)?.toLowerCase() || "";
-  return name.startsWith(".env") || name.includes("secret") || name.includes("credential")
-    || [".pem", ".key", ".p12", ".pfx"].some((extension) => name.endsWith(extension));
-}
-
 function languageForPath(path: string) {
   const lower = path.toLowerCase();
   if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
@@ -72,7 +66,11 @@ function statusToCapability(status: WorkspaceStatus): CapabilityState {
   return status;
 }
 
-export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: string; focusRequest?: number }) {
+export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl }: {
+  focusPath?: string;
+  focusRequest?: number;
+  onOpenSourceControl: (path: string) => void;
+}) {
   const agentProvider = useAgentProvider();
   const [currentPath, setCurrentPath] = useState("");
   const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
@@ -93,16 +91,6 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
   const [creatingFileBusy, setCreatingFileBusy] = useState(false);
   const [newFileError, setNewFileError] = useState("");
   const [gitSetupOpen, setGitSetupOpen] = useState(false);
-  const [gitManageOpen, setGitManageOpen] = useState(false);
-  const [gitRepositoryPath, setGitRepositoryPath] = useState("projects/");
-  const [gitStatus, setGitStatus] = useState<WorkspaceGitStatus | null>(null);
-  const [gitStatusBusy, setGitStatusBusy] = useState(false);
-  const [gitOperationBusy, setGitOperationBusy] = useState(false);
-  const [gitOperationMessage, setGitOperationMessage] = useState("");
-  const [selectedGitPaths, setSelectedGitPaths] = useState<Set<string>>(() => new Set());
-  const [gitCommitMessage, setGitCommitMessage] = useState("");
-  const [gitAuthorName, setGitAuthorName] = useState("");
-  const [gitAuthorEmail, setGitAuthorEmail] = useState("");
   const [gitCloneOpen, setGitCloneOpen] = useState(false);
   const [gitCloneUrl, setGitCloneUrl] = useState("");
   const [gitClonePath, setGitClonePath] = useState("projects/new-repository");
@@ -551,77 +539,6 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
     }
   }
 
-  async function loadGitStatus(path = gitRepositoryPath.trim()): Promise<boolean> {
-    setGitStatusBusy(true);
-    setGitOperationMessage("");
-    try {
-      const result = await compatClient.getWorkspaceGitStatus(path);
-      setGitStatus(result.status);
-      setGitRepositoryPath(result.status.path);
-      setSelectedGitPaths(new Set());
-      setGitAuthorName((current) => current || result.status.author_name);
-      setGitAuthorEmail((current) => current || result.status.author_email);
-      return true;
-    } catch (error) {
-      setGitStatus(null);
-      setGitOperationMessage(`Git status failed: ${error}`);
-      return false;
-    } finally {
-      setGitStatusBusy(false);
-    }
-  }
-
-  function toggleGitChange(change: WorkspaceGitStatus["changes"][number], checked: boolean) {
-    setSelectedGitPaths((current) => {
-      const next = new Set(current);
-      for (const path of [change.path, change.related_path].filter((value): value is string => Boolean(value))) {
-        if (checked) next.add(path);
-        else next.delete(path);
-      }
-      return next;
-    });
-  }
-
-  async function runGitOperation(action: WorkspaceGitOperation) {
-    if (!gitStatus) return;
-    if (action === "commit" && selectedGitPaths.size === 0) {
-      setGitOperationMessage("Select at least one changed file to commit.");
-      return;
-    }
-    const confirmation = action === "commit"
-      ? `${selectedGitPaths.size} selected path(s) in ${gitStatus.path}${[...selectedGitPaths].some(isLikelySecretPath) ? ` include likely secret files: ${[...selectedGitPaths].filter(isLikelySecretPath).join(", ")}. Verify these are safe to commit.\n\n` : "?\n\n"}Continue?`
-      : action === "pull_ff"
-        ? `Fetch and fast-forward ${gitStatus.branch} from ${gitStatus.upstream}?`
-        : `Push committed changes from ${gitStatus.branch} to ${gitStatus.remote_host}?`;
-    if (!window.confirm(confirmation)) return;
-    setGitOperationBusy(true);
-    setGitOperationMessage("");
-    try {
-      const result = await compatClient.runWorkspaceGitOperation({
-        action, path: gitStatus.path, confirm: true,
-        ...(action === "commit" ? {
-          paths: [...selectedGitPaths], message: gitCommitMessage,
-          author_name: gitAuthorName, author_email: gitAuthorEmail,
-          confirm_sensitive: [...selectedGitPaths].some(isLikelySecretPath),
-        } : {}),
-      });
-      let successMessage: string;
-      if (action === "commit" && "commit" in result.result) {
-        successMessage = `Created ${result.result.commit}: ${result.result.message}`;
-        setGitCommitMessage("");
-      } else if (action === "pull_ff") {
-        successMessage = "Fast-forward pull completed.";
-      } else {
-        successMessage = "Push completed.";
-      }
-      if (await loadGitStatus(gitStatus.path)) setGitOperationMessage(successMessage);
-    } catch (error) {
-      setGitOperationMessage(`Git ${action} failed: ${error}`);
-    } finally {
-      setGitOperationBusy(false);
-    }
-  }
-
   async function toggleDirectory(path: string) {
     if (expandedPaths.has(path)) {
       setExpandedPaths((current) => {
@@ -1066,10 +983,9 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
               if (file) void importFile(file);
               event.currentTarget.value = "";
             }} />
-            <button className="btn secondary small" type="button" onClick={() => {
-              setGitManageOpen((open) => !open);
-              if (currentPath.startsWith("projects/")) setGitRepositoryPath(currentPath);
-            }}>Git status</button>
+            <button className="btn secondary small" type="button" onClick={() => onOpenSourceControl(currentPath)}>
+              <Icon name="branch" size={14} /> Source Control
+            </button>
             <button className="btn secondary small" type="button" onClick={() => void openGitClonePanel()}>Clone Git repo</button>
             <button className="btn secondary small" type="button" onClick={() => {
               setGitSetupOpen(!gitSetupOpen);
@@ -1114,39 +1030,6 @@ export function ProjectWorkspace({ focusPath, focusRequest }: { focusPath?: stri
               <button className="btn primary small" type="button" onClick={() => void initializeGitRepository()} disabled={gitBusy || (gitPreview.file_count > 0 && !gitConfirmFiles)}>{gitBusy ? "Initializing..." : "Initialize and commit"}</button>
             </div>}
             {gitSetupMessage && <p className={gitSetupMessage.startsWith("Git initialization failed") || gitSetupMessage.startsWith("Preview failed") ? "jobs-error" : "project-git-success"} role="status">{gitSetupMessage}</p>}
-          </div>}
-          {gitManageOpen && <div className="project-git-setup project-git-manage">
-            <form onSubmit={(event) => { event.preventDefault(); void loadGitStatus(); }}>
-              <label>Repository path<input value={gitRepositoryPath} onChange={(event) => setGitRepositoryPath(event.target.value)} placeholder="projects/my-repository" required /></label>
-              <button className="btn secondary small" type="submit" disabled={gitStatusBusy}>{gitStatusBusy ? "Checking..." : "Refresh Git status"}</button>
-            </form>
-            {gitStatus && <>
-              <div className="project-git-state">
-                <strong>{gitStatus.path} · {gitStatus.branch || "detached HEAD"}</strong>
-                <span>{gitStatus.upstream ? `${gitStatus.upstream} · ${gitStatus.ahead} ahead · ${gitStatus.behind} behind` : "No upstream configured"}</span>
-                <span>{gitStatus.remote_host ? `origin: ${gitStatus.remote_transport} · ${gitStatus.remote_host}` : "No supported origin remote"}</span>
-              </div>
-              {gitStatus.changes.length > 0 ? <>
-                {[...selectedGitPaths].some(isLikelySecretPath) && <p className="project-git-warning" role="alert">Selected filenames may contain secrets. Review their contents before committing.</p>}
-                <div className="project-git-actions">
-                  <button className="btn secondary small" type="button" onClick={() => setSelectedGitPaths(new Set(gitStatus.changes.flatMap((change) => [change.path, ...(change.related_path ? [change.related_path] : [])])))}>Select all</button>
-                  <button className="btn secondary small" type="button" onClick={() => setSelectedGitPaths(new Set())}>Clear selection</button>
-                </div>
-                <ul className="project-git-change-list">{gitStatus.changes.map((change) => <li key={`${change.path}:${change.related_path || ""}`}>
-                  <label><input type="checkbox" checked={selectedGitPaths.has(change.path)} onChange={(event) => toggleGitChange(change, event.target.checked)} />
-                    <span><strong>{change.status}</strong> {change.path}{change.related_path ? ` ← ${change.related_path}` : ""}{change.conflicted ? " · conflict" : ""}</span></label>
-                </li>)}</ul>
-                <label>Commit message<input value={gitCommitMessage} maxLength={2000} onChange={(event) => setGitCommitMessage(event.target.value)} placeholder="Describe this change" /></label>
-                <label>Author name<input value={gitAuthorName} onChange={(event) => setGitAuthorName(event.target.value)} required /></label>
-                <label>Author email<input type="email" value={gitAuthorEmail} onChange={(event) => setGitAuthorEmail(event.target.value)} required /></label>
-                <button className="btn primary small" type="button" disabled={gitOperationBusy || !gitCommitMessage.trim() || !gitAuthorName.trim() || !gitAuthorEmail.trim() || selectedGitPaths.size === 0} onClick={() => void runGitOperation("commit")}>Commit selected files</button>
-              </> : <p className="muted">Working tree clean.</p>}
-              <div className="project-git-actions">
-                <button className="btn secondary small" type="button" disabled={gitOperationBusy || !gitStatus.upstream} onClick={() => void runGitOperation("pull_ff")}>Pull fast-forward</button>
-                <button className="btn secondary small" type="button" disabled={gitOperationBusy || !gitStatus.remote_host || !gitStatus.branch} onClick={() => void runGitOperation("push")}>Push commits</button>
-              </div>
-            </>}
-            {gitOperationMessage && <p className={gitOperationMessage.includes("failed") ? "jobs-error" : "project-git-success"} role="status">{gitOperationMessage}</p>}
           </div>}
           {gitCloneOpen && <div className="project-git-setup">
             <form onSubmit={(event) => void cloneGitRepository(event)}>

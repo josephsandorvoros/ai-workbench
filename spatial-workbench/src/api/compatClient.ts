@@ -182,11 +182,13 @@ export interface WorkspaceGitChange {
   status: string;
   conflicted: boolean;
   staged: boolean;
+  unstaged: boolean;
 }
 
 export interface WorkspaceGitStatus {
   path: string;
   branch: string;
+  branches: string[];
   upstream: string;
   ahead: number | null;
   behind: number | null;
@@ -198,7 +200,14 @@ export interface WorkspaceGitStatus {
   author_email: string;
 }
 
-export type WorkspaceGitOperation = "commit" | "pull_ff" | "push";
+export interface WorkspaceGitCommit {
+  commit: string;
+  subject: string;
+  author: string;
+  authored_at: string;
+}
+
+export type WorkspaceGitOperation = "commit" | "commit_staged" | "stage" | "unstage" | "switch_branch" | "pull_ff" | "push";
 
 export interface WorkspaceListResponse {
   ok: boolean;
@@ -434,7 +443,9 @@ export const compatClient = {
     postJson<{ ok: boolean } & WorkspaceGitClone>("/api/workspace/git/clone", { url, destination }),
   getWorkspaceGitStatus: (path: string) =>
     getJson<{ ok: boolean; status: WorkspaceGitStatus }>(withQuery("/api/workspace/git/status", { path })),
-  runWorkspaceGitOperation: (body: { action: WorkspaceGitOperation; path: string; confirm: true; confirm_sensitive?: boolean; paths?: string[]; message?: string; author_name?: string; author_email?: string }) =>
+  getWorkspaceGitHistory: (path: string, limit = 30) =>
+    getJson<{ ok: boolean; path: string; commits: WorkspaceGitCommit[] }>(withQuery("/api/workspace/git/history", { path, limit })),
+  runWorkspaceGitOperation: (body: { action: WorkspaceGitOperation; path: string; confirm: true; confirm_sensitive?: boolean; paths?: string[]; branch?: string; message?: string; author_name?: string; author_email?: string }) =>
     postJson<{ ok: boolean; result: WorkspaceGitStatus | { path: string; commit: string; message: string; files: string[] } }>("/api/workspace/git/operation", body),
   uploadFile: (filename: string, contentBase64: string) =>
     postJson<{ ok: boolean; path: string; name: string; size: number }>("/api/workspace/upload", {

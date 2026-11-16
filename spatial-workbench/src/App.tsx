@@ -2,6 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { detectRuntimeMode, getCapabilityView } from "./api/capabilityRegistry";
 import { compatClient, type AppConfig, type CapabilityState, type NodeStats, type StatsSourceResponse } from "./api/compatClient";
 import { ProjectWorkspace } from "./components/ProjectWorkspace";
+import { SourceControlWorkbench } from "./components/SourceControlWorkbench";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { WikiWorkbench } from "./components/WikiWorkbench";
 import { AgentWorkbench } from "./components/AgentWorkbench";
@@ -95,7 +96,7 @@ interface MetricPillProps {
   detail?: string;
 }
 
-type WorkspaceTab = "chat" | "project" | "jobs" | "board" | "wiki" | "agent" | "terminal" | "guardrails";
+type WorkspaceTab = "chat" | "project" | "source-control" | "jobs" | "board" | "wiki" | "agent" | "terminal" | "guardrails";
 
 const SpatialBoard = lazy(() => import("./components/SpatialBoard").then((module) => ({ default: module.SpatialBoard })));
 
@@ -116,6 +117,12 @@ const workspaceTabs: Array<{
     label: "Projects",
     detail: "Project explorer and Monaco file view.",
     icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z",
+  },
+  {
+    id: "source-control",
+    label: "Source Control",
+    detail: "Review repository changes, commit selected files, and sync with origin.",
+    icon: "M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm12 12a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM6 3v18m0-12c0 3 12 3 12 3v3",
   },
   {
     id: "jobs",
@@ -238,6 +245,7 @@ export function App() {
   const [streamStatus, setStreamStatus] = useState<CapabilityState>("unavailable");
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<WorkspaceTab>(() => getInitialWorkspaceTab());
   const [projectFocus, setProjectFocus] = useState<{ path: string; request: number } | null>(null);
+  const [sourceControlPath, setSourceControlPath] = useState("");
   const [updates, setUpdates] = useState<UpdatesStatus | null>(null);
   const refreshUpdates = useCallback((force = false) => {
     loadUpdates(force).then(setUpdates).catch(() => undefined);
@@ -480,6 +488,11 @@ export function App() {
     persistWorkspaceTab(tab);
   }
 
+  function openSourceControl(path: string) {
+    setSourceControlPath(path);
+    selectWorkspaceTab("source-control");
+  }
+
   const statsSource = "AI node monitor";
   async function changeStatsSource(source: StatsSourceResponse["selected"]) {
     try {
@@ -591,7 +604,19 @@ export function App() {
               role="tabpanel"
               aria-label="Project workspace"
             >
-              <ProjectWorkspace focusPath={projectFocus?.path} focusRequest={projectFocus?.request} />
+              <ProjectWorkspace
+                focusPath={projectFocus?.path}
+                focusRequest={projectFocus?.request}
+                onOpenSourceControl={openSourceControl}
+              />
+            </div>
+            <div
+              hidden={activeWorkspaceTab !== "source-control"}
+              id="workspace-panel-source-control"
+              role="tabpanel"
+              aria-label="Source Control"
+            >
+              <SourceControlWorkbench active={activeWorkspaceTab === "source-control"} initialPath={sourceControlPath} />
             </div>
             <div
               hidden={activeWorkspaceTab !== "wiki"}

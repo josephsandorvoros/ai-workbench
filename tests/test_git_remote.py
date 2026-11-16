@@ -74,6 +74,48 @@ class GitRemoteTests(unittest.TestCase):
             with self.assertRaisesRegex(git_remote.GitRemoteError, "already has staged changes"):
                 git_remote.commit_paths(workspace, "projects/demo", ["staged.txt"], "Staged commit", "Test", "test@example.invalid")
 
+    def test_stage_unstage_branch_switch_and_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            (workspace / "projects").mkdir(parents=True)
+            repo = self.make_repository(workspace)
+            self.run_git("-C", repo, "branch", "feature/demo")
+            (repo / "notes.txt").write_text("new file\n", encoding="utf-8")
+
+            staged = git_remote.stage_paths(workspace, "projects/demo", ["notes.txt"])
+            self.assertTrue(staged["changes"][0]["staged"])
+            unstaged = git_remote.unstage_paths(workspace, "projects/demo", ["notes.txt"])
+            self.assertFalse(unstaged["changes"][0]["staged"])
+
+            (repo / "notes.txt").unlink()
+            switched = git_remote.switch_branch(workspace, "projects/demo", "feature/demo")
+            self.assertEqual(switched["branch"], "feature/demo")
+            with self.assertRaisesRegex(git_remote.GitRemoteError, "existing local branch"):
+                git_remote.switch_branch(workspace, "projects/demo", "feature/unknown")
+
+            history = git_remote.repository_history(workspace, "projects/demo")
+            self.assertEqual(history["commits"][0]["subject"], "initial")
+            self.assertEqual(history["commits"][0]["author"], "Git Test")
+            self.assertEqual(len(history["commits"][0]["commit"]), 40)
+            with self.assertRaisesRegex(git_remote.GitRemoteError, "between 1 and 100"):
+                git_remote.repository_history(workspace, "projects/demo", 101)
+
+    def test_commit_staged_preserves_unstaged_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            (workspace / "projects").mkdir(parents=True)
+            repo = self.make_repository(workspace)
+            (repo / "README.md").write_text("# Staged update\n", encoding="utf-8")
+            (repo / "notes.txt").write_text("leave unstaged\n", encoding="utf-8")
+            git_remote.stage_paths(workspace, "projects/demo", ["README.md"])
+
+            result = git_remote.commit_staged(
+                workspace, "projects/demo", "Update README", "Test User", "test@example.invalid",
+            )
+            self.assertEqual(result["files"], ["README.md"])
+            self.assertEqual(self.run_git("-C", repo, "show", "HEAD:README.md"), "# Staged update")
+            self.assertEqual(self.run_git("-C", repo, "status", "--porcelain"), "?? notes.txt")
+
     def test_pull_and_push_use_fast_forward_and_never_force(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
