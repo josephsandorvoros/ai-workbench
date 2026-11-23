@@ -10,6 +10,7 @@ export interface SpeechVoicesResponse {
 }
 
 export const MAX_SPEECH_RECORDING_BYTES = 8 * 1024 * 1024;
+export const MAX_SPEECH_RECORDING_MS = 3 * 60 * 1000;
 
 export function textForSpeech(markdown: string): string {
   return markdown

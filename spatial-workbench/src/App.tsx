@@ -8,6 +8,7 @@ import { WikiWorkbench } from "./components/WikiWorkbench";
 import { AgentWorkbench } from "./components/AgentWorkbench";
 import { SessionsWorkbench } from "./components/SessionsWorkbench";
 import { AgentChat } from "./components/AgentChat";
+import { useMobileChat } from "./lib/useMobileChat";
 import { GuardrailsWorkbench } from "./components/GuardrailsWorkbench";
 import { JobsBoard } from "./components/JobsBoard";
 import { FreeModelsMenu } from "./components/FreeModelsMenu";
@@ -96,7 +97,7 @@ interface MetricPillProps {
   detail?: string;
 }
 
-type WorkspaceTab = "chat" | "project" | "source-control" | "jobs" | "board" | "wiki" | "agent" | "terminal" | "guardrails";
+type WorkspaceTab = "sessions" | "project" | "source-control" | "jobs" | "board" | "wiki" | "agent" | "terminal" | "guardrails";
 
 const SpatialBoard = lazy(() => import("./components/SpatialBoard").then((module) => ({ default: module.SpatialBoard })));
 
@@ -107,9 +108,9 @@ const workspaceTabs: Array<{
   icon: string;
 }> = [
   {
-    id: "chat",
-    label: "Chat",
-    detail: "Agent conversation panel.",
+    id: "sessions",
+    label: "Sessions",
+    detail: "Browse and manage saved conversations.",
     icon: "M4 5h16v12H7l-3 3V5Zm4 4h8m-8 4h5",
   },
   {
@@ -171,9 +172,11 @@ function isWorkspaceTab(value: string | null): value is WorkspaceTab {
 function getInitialWorkspaceTab(): WorkspaceTab {
   try {
     const fromUrl = new URLSearchParams(window.location.search).get("tab");
+    if (fromUrl === "chat") return "sessions";
     if (fromUrl === "artifacts") return "project";
     if (isWorkspaceTab(fromUrl)) return fromUrl;
     const fromStorage = window.localStorage.getItem(WORKSPACE_TAB_STORAGE_KEY);
+    if (fromStorage === "chat") return "sessions";
     if (fromStorage === "artifacts") return "project";
     if (isWorkspaceTab(fromStorage)) return fromStorage;
   } catch (_error) {
@@ -231,6 +234,7 @@ function formatWorkspaceEvent(event: WorkspaceFileEvent) {
 }
 
 export function App() {
+  const mobileChat = useMobileChat();
   const runtimeMode = detectRuntimeMode();
   const capabilityView = getCapabilityView(runtimeMode);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -244,6 +248,16 @@ export function App() {
   const [runtimeLog, setRuntimeLog] = useState<ShellCommandStreamEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<CapabilityState>("unavailable");
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<WorkspaceTab>(() => getInitialWorkspaceTab());
+  const [canvasOpen, setCanvasOpen] = useState(() => {
+    if (mobileChat) return false;
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return isWorkspaceTab(tab) || tab === "artifacts" || tab === "chat";
+  });
+  const [openTabs, setOpenTabs] = useState<WorkspaceTab[]>(() => canvasOpen ? [activeWorkspaceTab] : []);
+  const [visitedTabs, setVisitedTabs] = useState<WorkspaceTab[]>(() => canvasOpen ? [activeWorkspaceTab] : []);
+  const [canvasExpanded, setCanvasExpanded] = useState(false);
+  const showCanvas = canvasOpen && !mobileChat;
+  const canvasTriggerRef = useRef<HTMLButtonElement>(null);
   const [projectFocus, setProjectFocus] = useState<{ path: string; request: number } | null>(null);
   const [sourceControlPath, setSourceControlPath] = useState("");
   const [updates, setUpdates] = useState<UpdatesStatus | null>(null);
@@ -251,66 +265,60 @@ export function App() {
     loadUpdates(force).then(setUpdates).catch(() => undefined);
   }, []);
   useEffect(() => {
+    if (mobileChat) return;
     refreshUpdates();
     const timer = window.setInterval(() => refreshUpdates(), 6 * 60 * 60 * 1000);
     return () => window.clearInterval(timer);
-  }, [refreshUpdates]);
+  }, [refreshUpdates, mobileChat]);
   const updateCount = countUpdates(updates);
   const [watchId, setWatchId] = useState<string | null>(null);
   const [watchStatus, setWatchStatus] = useState<CapabilityState>("unavailable");
   const [watchLog, setWatchLog] = useState<WorkspaceFileEvent[]>([]);
 
   useEffect(() => {
+    if (mobileChat) return;
     let live = true;
     void compatClient.getStatsSource().then((result) => {
       if (live) setStatsSourceInfo(result);
     }).catch(() => undefined);
     return () => { live = false; };
-  }, []);
+  }, [mobileChat]);
 
-  // Resizable right side panel (drag the handle between the workspace and the panel).
   const [sidePanelWidth, setSidePanelWidth] = useState<number>(() => {
     try {
-      const stored = Number(localStorage.getItem("spatial-workbench.sidePanelWidth"));
-      return Number.isFinite(stored) && stored >= 280 ? stored : 340;
+      const stored = Number(localStorage.getItem("spatial-workbench.canvasWidth"));
+      return Number.isFinite(stored) && stored >= 360 ? stored : 640;
     } catch {
-      return 340;
+      return 640;
     }
   });
   const [resizing, setResizing] = useState(false);
   const gridRef = useRef<HTMLDivElement | null>(null);
-  const sidePanelWidthRef = useRef(sidePanelWidth);
-  useEffect(() => {
-    sidePanelWidthRef.current = sidePanelWidth;
-  }, [sidePanelWidth]);
+  const [canvasMaxWidth, setCanvasMaxWidth] = useState(960);
 
-  const startResize = useCallback((event: React.MouseEvent) => {
-    event.preventDefault();
+  useEffect(() => {
+    if (mobileChat) return;
     const grid = gridRef.current;
     if (!grid) return;
-    const gridRect = grid.getBoundingClientRect();
-    const gap = 16; // matches --space-md
-    const min = 280;
-    const max = Math.max(min, gridRect.width - 320);
-    setResizing(true);
+    const observer = new ResizeObserver(() => {
+      const railWidth = grid.querySelector("nav")?.clientWidth ?? 164;
+      const max = Math.max(360, grid.clientWidth - railWidth - 356);
+      setCanvasMaxWidth(max);
+      setSidePanelWidth((width) => Math.min(width, max));
+    });
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [mobileChat]);
 
-    const onMove = (moveEvent: MouseEvent) => {
-      const width = Math.min(max, Math.max(min, gridRect.right - moveEvent.clientX - gap));
-      setSidePanelWidth(width);
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      setResizing(false);
-      try {
-        localStorage.setItem("spatial-workbench.sidePanelWidth", String(sidePanelWidthRef.current));
-      } catch {
-        /* ignore */
-      }
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, []);
+  function resizeCanvas(width: number) {
+    const next = Math.min(canvasMaxWidth, Math.max(360, width));
+    setSidePanelWidth(next);
+    try {
+      localStorage.setItem("spatial-workbench.canvasWidth", String(next));
+    } catch {
+      // The canvas remains resizable when browser storage is restricted.
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -369,8 +377,10 @@ export function App() {
     }
 
     void loadConfig();
-    void pollStats();
-    void loadDesktopState();
+    if (!mobileChat) {
+      void pollStats();
+      void loadDesktopState();
+    }
 
     return () => {
       cancelled = true;
@@ -378,7 +388,7 @@ export function App() {
         window.clearTimeout(statsTimer);
       }
     };
-  }, []);
+  }, [mobileChat]);
 
   useEffect(() => {
     let disposed = false;
@@ -476,16 +486,37 @@ export function App() {
   }
 
   function selectWorkspaceTab(tab: WorkspaceTab) {
-    if (tab === "chat") {
-      setActiveWorkspaceTab("chat");
-      persistWorkspaceTab("chat");
-      window.requestAnimationFrame(() => {
-        document.querySelector<HTMLTextAreaElement>(".agent-chat-input")?.focus();
-      });
-      return;
-    }
+    if (mobileChat) return;
     setActiveWorkspaceTab(tab);
+    setOpenTabs((current) => current.includes(tab) ? current : [...current, tab]);
+    setVisitedTabs((current) => current.includes(tab) ? current : [...current, tab]);
+    setCanvasOpen(true);
     persistWorkspaceTab(tab);
+    window.requestAnimationFrame(() => {
+      const selected = document.getElementById(`canvas-tab-${tab}`);
+      selected?.focus();
+      selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  }
+
+  function closeCanvas() {
+    setCanvasOpen(false);
+    canvasTriggerRef.current?.focus();
+  }
+
+  function closeCanvasTab(tab: WorkspaceTab) {
+    const remaining = openTabs.filter((id) => id !== tab);
+    setOpenTabs(remaining);
+    if (remaining.length === 0) {
+      closeCanvas();
+    } else {
+      const next = activeWorkspaceTab === tab
+        ? remaining[Math.max(0, openTabs.indexOf(tab) - 1)]
+        : activeWorkspaceTab;
+      setActiveWorkspaceTab(next);
+      persistWorkspaceTab(next);
+      window.requestAnimationFrame(() => document.getElementById(`canvas-tab-${next}`)?.focus());
+    }
   }
 
   function openSourceControl(path: string) {
@@ -510,17 +541,28 @@ export function App() {
     ? `CLI: ${runtimeConfig.hermes_cli_path}; endpoint: ${runtimeConfig.hermes_endpoint_url || "not configured"}`
     : "Runtime config is available in Tauri desktop mode.";
   return (
-    <main className="app-shell">
+    <main className="app-shell chat-first-shell">
       <header className="hero-card">
         <div className="hero-title">
           <h1>AI Workbench</h1>
           <p className="hero-tagline">Your models. Your rules.</p>
         </div>
-        <div className="hero-status">
+        {!mobileChat && <div className="hero-status">
           <FreeModelsMenu />
           <HelpMenu />
-        </div>
-        <div className="hero-metrics" aria-label="Node monitor">
+          <button
+            ref={canvasTriggerRef}
+            className="canvas-trigger"
+            type="button"
+            aria-expanded={showCanvas}
+            aria-controls="workbench-canvas"
+            onClick={() => canvasOpen ? closeCanvas() : selectWorkspaceTab(activeWorkspaceTab)}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M14 4v16" /></svg>
+            Canvas
+          </button>
+        </div>}
+        {!mobileChat && <div className="hero-metrics" aria-label="Node monitor">
           <MetricPill label="CPU" value={formatPercent(stats?.cpu?.usage_percent)} reading={stats?.cpu?.usage_percent} detail={`${stats?.cpu?.core_count ?? "--"} vCPU`} />
           <MetricPill label="CPU T" value={formatTemperature(cpuTemp)} reading={cpuTemp} detail="Scale: 0-100 C" />
           <MetricPill label="GPU" value={formatPercent(stats?.gpu?.utilization_gpu)} reading={stats?.gpu?.utilization_gpu} detail={stats?.gpu ? "NVIDIA source" : "No GPU data"} />
@@ -562,20 +604,35 @@ export function App() {
               {updateCount} update{updateCount > 1 ? "s" : ""}
             </button>
           ) : null}
-        </div>
+        </div>}
       </header>
 
       <div
-        className={`main-grid ${resizing ? "resizing" : ""}`}
+        className={`main-grid conversation-layout${showCanvas ? " canvas-open" : ""}${canvasExpanded ? " canvas-expanded" : ""}${resizing ? " resizing" : ""}`}
         ref={gridRef}
-        style={{ gridTemplateColumns: `auto minmax(0, 1fr) ${sidePanelWidth}px` }}
+        style={{ "--canvas-width": `${sidePanelWidth}px` } as React.CSSProperties}
       >
-        <nav className="activity-bar" aria-label="Workspace tools">
+        {!mobileChat && <nav className="activity-bar" aria-label="Workspace tools">
+          <button
+            className={`activity-btn conversation-home${!canvasOpen ? " active" : ""}`}
+            type="button"
+            aria-label="Chat"
+            aria-current={!canvasOpen ? "page" : undefined}
+            onClick={() => {
+              setCanvasOpen(false);
+              document.querySelector<HTMLTextAreaElement>(".agent-chat-input")?.focus();
+            }}
+            title="Chat"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 5h16v12H7l-3 3V5Zm4 4h8m-8 4h5" /></svg>
+            <span>Chat</span>
+          </button>
+          <span className="activity-label">Workspace</span>
           {workspaceTabs.map((tab) => (
             <button
-              aria-current={activeWorkspaceTab === tab.id ? "page" : undefined}
+              aria-current={canvasOpen && activeWorkspaceTab === tab.id ? "page" : undefined}
               aria-label={tab.label}
-              className={`activity-btn ${activeWorkspaceTab === tab.id ? "active" : ""}`}
+              className={`activity-btn ${canvasOpen && activeWorkspaceTab === tab.id ? "active" : ""}`}
               key={tab.id}
               onClick={() => selectWorkspaceTab(tab.id)}
               title={tab.label}
@@ -584,112 +641,204 @@ export function App() {
               <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d={tab.icon} />
               </svg>
+              <span>{tab.label}</span>
             </button>
           ))}
-        </nav>
+          <p className="activity-footer">Your models.<br />Your rules.</p>
+        </nav>}
 
-        <section className="workspace-panel primary-panel" aria-label="Workspace">
+        <section className="conversation-stage" aria-label="Conversation">
+          <AgentChat />
+        </section>
+
+        <section
+          id="workbench-canvas"
+          className="workspace-panel workbench-canvas"
+          aria-label="Workspace canvas"
+          hidden={!showCanvas}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !event.defaultPrevented) {
+              if (event.target instanceof Element && event.target.closest("dialog[open], [role='dialog']")) return;
+              event.stopPropagation();
+              closeCanvas();
+            }
+          }}
+        >
+          <div
+            className="panel-resize-handle"
+            role="separator"
+            tabIndex={canvasExpanded ? -1 : 0}
+            aria-orientation="vertical"
+            aria-label="Resize canvas"
+            aria-valuemin={360}
+            aria-valuemax={canvasMaxWidth}
+            aria-valuenow={sidePanelWidth}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.currentTarget.focus();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              setResizing(true);
+            }}
+            onPointerMove={(event) => {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              const rect = gridRef.current?.getBoundingClientRect();
+              if (rect) resizeCanvas(rect.right - event.clientX);
+            }}
+            onPointerUp={(event) => {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+              setResizing(false);
+            }}
+            onLostPointerCapture={() => setResizing(false)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+                event.preventDefault();
+                resizeCanvas(sidePanelWidth + (event.key === "ArrowLeft" ? 40 : -40));
+              }
+            }}
+            title="Drag or use arrow keys to resize"
+          />
+          <header className="canvas-header">
+            <span className="canvas-heading">Canvas</span>
+            <div className="canvas-actions">
+              <button className="canvas-icon-btn" type="button" aria-label={canvasExpanded ? "Restore canvas size" : "Expand canvas"} aria-pressed={canvasExpanded} onClick={() => setCanvasExpanded((value) => !value)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d={canvasExpanded ? "M4 9h5V4m11 11h-5v5M9 9 3 3m12 12 6 6" : "M9 4H4v5m11 11h5v-5M4 4l6 6m10 10-6-6"} /></svg>
+              </button>
+              <button className="canvas-icon-btn" type="button" aria-label="Close canvas" onClick={closeCanvas}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+              </button>
+            </div>
+          </header>
+          <div className="canvas-tabs" role="tablist" aria-label="Open canvas tools">
+            {openTabs.map((id) => {
+              const tab = workspaceTabs.find((item) => item.id === id)!;
+              return (
+                <div className={`canvas-tab${id === activeWorkspaceTab ? " selected" : ""}`} key={id} role="presentation">
+                  <button
+                    id={`canvas-tab-${id}`}
+                    role="tab"
+                    type="button"
+                    aria-selected={id === activeWorkspaceTab}
+                    aria-controls={`workspace-panel-${id}`}
+                    tabIndex={id === activeWorkspaceTab ? 0 : -1}
+                    onClick={() => selectWorkspaceTab(id)}
+                    onKeyDown={(event) => {
+                      const index = openTabs.indexOf(id);
+                      let next: WorkspaceTab | undefined;
+                      if (event.key === "ArrowRight") next = openTabs[(index + 1) % openTabs.length];
+                      if (event.key === "ArrowLeft") next = openTabs[(index + openTabs.length - 1) % openTabs.length];
+                      if (event.key === "Home") next = openTabs[0];
+                      if (event.key === "End") next = openTabs[openTabs.length - 1];
+                      if (event.key === "Delete") {
+                        event.preventDefault();
+                        closeCanvasTab(id);
+                      }
+                      if (next) {
+                        event.preventDefault();
+                        selectWorkspaceTab(next);
+                        document.getElementById(`canvas-tab-${next}`)?.focus();
+                      }
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d={tab.icon} /></svg>
+                    {tab.label}
+                  </button>
+                  <button className="canvas-tab-close" type="button" aria-label={`Close ${tab.label} tab`} onClick={() => closeCanvasTab(id)}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
           <div className="workspace-tab-panels">
             <div
-              hidden={activeWorkspaceTab !== "chat"}
-              id="workspace-panel-chat"
+              hidden={activeWorkspaceTab !== "sessions"}
+              id="workspace-panel-sessions"
               role="tabpanel"
-              aria-label="Chat"
+              aria-labelledby="canvas-tab-sessions"
             >
-              <SessionsWorkbench />
+              {visitedTabs.includes("sessions") && <SessionsWorkbench />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "project"}
               id="workspace-panel-project"
               role="tabpanel"
-              aria-label="Project workspace"
+              aria-labelledby="canvas-tab-project"
             >
-              <ProjectWorkspace
+              {visitedTabs.includes("project") && <ProjectWorkspace
                 focusPath={projectFocus?.path}
                 focusRequest={projectFocus?.request}
                 onOpenSourceControl={openSourceControl}
-              />
+              />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "source-control"}
               id="workspace-panel-source-control"
               role="tabpanel"
-              aria-label="Source Control"
+              aria-labelledby="canvas-tab-source-control"
             >
-              <SourceControlWorkbench
-                active={activeWorkspaceTab === "source-control"}
+              {visitedTabs.includes("source-control") && <SourceControlWorkbench
+                active={showCanvas && activeWorkspaceTab === "source-control"}
                 initialPath={sourceControlPath}
                 onOpenProjects={() => selectWorkspaceTab("project")}
-              />
+              />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "wiki"}
               id="workspace-panel-wiki"
               role="tabpanel"
-              aria-label="Wiki workbench"
+              aria-labelledby="canvas-tab-wiki"
             >
-              <WikiWorkbench />
+              {visitedTabs.includes("wiki") && <WikiWorkbench />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "board"}
               id="workspace-panel-board"
               role="tabpanel"
-              aria-label="Spatial board"
+              aria-labelledby="canvas-tab-board"
             >
-              <ErrorBoundary label="Spatial Board">
+              {visitedTabs.includes("board") && <ErrorBoundary label="Spatial Board">
                 <Suspense fallback={<PlannedWorkspacePane label="Spatial Board" detail="Loading canvas..." state="degraded" />}>
                   <SpatialBoard />
                 </Suspense>
-              </ErrorBoundary>
+              </ErrorBoundary>}
             </div>
-            <div hidden={activeWorkspaceTab !== "jobs"} id="workspace-panel-jobs" role="tabpanel" aria-label="Jobs board">
-              <JobsBoard active={activeWorkspaceTab === "jobs"} onOpenFiles={(jobId) => {
+            <div hidden={activeWorkspaceTab !== "jobs"} id="workspace-panel-jobs" role="tabpanel" aria-labelledby="canvas-tab-jobs">
+              {visitedTabs.includes("jobs") && <JobsBoard active={showCanvas && activeWorkspaceTab === "jobs"} onOpenFiles={(jobId) => {
                 setProjectFocus({ path: `jobs/${jobId}`, request: Date.now() });
                 selectWorkspaceTab("project");
-              }} />
+              }} />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "agent"}
               id="workspace-panel-agent"
               role="tabpanel"
-              aria-label="Agent workbench"
+              aria-labelledby="canvas-tab-agent"
             >
-              <AgentWorkbench />
+              {visitedTabs.includes("agent") && <AgentWorkbench />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "terminal"}
               id="workspace-panel-terminal"
               role="tabpanel"
-              aria-label="CLI"
+              aria-labelledby="canvas-tab-terminal"
             >
-              <TerminalWorkbench
-                active={activeWorkspaceTab === "terminal"}
+              {visitedTabs.includes("terminal") && <TerminalWorkbench
+                active={showCanvas && activeWorkspaceTab === "terminal"}
                 updates={updates}
                 onRefreshUpdates={() => refreshUpdates(true)}
-              />
+              />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "guardrails"}
               id="workspace-panel-guardrails"
               role="tabpanel"
-              aria-label="Guardrails workbench"
+              aria-labelledby="canvas-tab-guardrails"
             >
-              <GuardrailsWorkbench />
+              {visitedTabs.includes("guardrails") && <GuardrailsWorkbench />}
             </div>
           </div>
         </section>
 
-        <aside className="side-panel" aria-label="Agent panel">
-          <div
-            className="panel-resize-handle"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Drag to resize the agent panel"
-            onMouseDown={startResize}
-            title="Drag to resize"
-          />
-          <AgentChat />
-        </aside>
       </div>
     </main>
   );

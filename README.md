@@ -4,6 +4,10 @@
 
 A browser-based AI workbench: agent chat (Hermes / OpenCode / any OpenAI-compatible model), project files with Monaco and managed live app previews, a markdown wiki with `[[wikilinks]]`, an Excalidraw spatial board, HTML artifacts, a job board where Hermes plans work and isolated OpenCode workers execute it, and host resource monitoring.
 
+Chat is the central workspace. On desktop, select tools from the left navigation to open a floating, tabbed **Canvas** on the right, including the dedicated **Source Control** workspace. Keep several tools open, resize or expand the canvas, and close/reopen it without losing the conversation or tool state. Phones use a **chat-only** layout without the canvas, tool rail, or monitoring. Normal desktop page loads start with chat only; `?tab=...` links still open a specific tool on desktop.
+
+Browser tabs and bookmarks use the violet chat-and-canvas icon. On iPhone, use Safari's **Share → Add to Home Screen** for the matching home-screen icon. Icon assets ship in `spatial-workbench/public/` and are copied into production builds.
+
 ## Screenshots
 
 ![AI Workbench overview](screenshots/workbench-overview.png)
@@ -45,7 +49,9 @@ The companion server checks the public sources at startup and every 24 hours in 
 
 ## Voice chat
 
-The composer provides push-to-talk, an editable transcript, and explicit Send through the existing Hermes chat. Completed replies can optionally be spoken, replayed, or stopped; mute disables automatic speech. Configure each installation in **Agent Workbench → Speech services → Settings**: URL overrides and tokens are saved by the companion server. Blank token fields preserve the saved secret; **Clear** removes it. `SPEECH_STT_URL` and `SPEECH_TTS_URL` remain deployment defaults, and **Use deployment URLs** restores them. Tokens never appear in browser settings or `.env`. This integration expects the supplied wrapper contracts; another provider such as ElevenLabs requires a server-side adapter. The deployed companion container, not merely the repository checkout, must reach the speech host. Microphone use requires HTTPS or localhost. Voice blends are not exposed. The wrapper currently reports zero voices and advertises a JSON schema for an endpoint expected to return WAV, so real voice functionality remains unverified until these defects are resolved.
+Mobile defaults to **Browser** speech: live dictation updates the composer until Stop or the browser ends the session, with no Workbench recording timer. Browser/system voices handle spoken replies. **Speak replies** remains opt-in, and transcripts are reviewed before explicit Send. Browser support varies; audio or text may be processed by the browser vendor rather than on-device. Unsupported browsers explain the limitation and offer keyboard dictation or an explicit switch to **Speech service**; no automatic server fallback occurs.
+
+Desktop defaults to **Speech service**, with recordings up to three minutes and the existing 8 MB upload limit. This mode transcribes after Stop, not as a stream. Either layout can change the Speech selector. Completed replies can optionally be spoken, replayed, or stopped; mute disables automatic speech. Configure server services in **Agent Workbench → Speech services → Settings**: URL overrides and tokens are saved by the companion server. Blank token fields preserve the saved secret; **Clear** removes it. `SPEECH_STT_URL` and `SPEECH_TTS_URL` remain deployment defaults, and **Use deployment URLs** restores them. Tokens never appear in browser settings or `.env`. This integration expects the supplied wrapper contracts; another provider such as ElevenLabs requires a server-side adapter. The deployed companion container, not merely the repository checkout, must reach the speech host. Microphone use requires HTTPS or localhost. Voice blends are not exposed. Real microphone, mobile browser speech, and configured wrapper interoperability require device validation.
 
 ## Jobs board
 

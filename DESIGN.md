@@ -127,9 +127,13 @@ Migration rule:
 - Empty/loading/error states in dynamic list containers must use shared muted-message rendering utilities in JavaScript.
 
 ### Layout
-- Use panel-based sections with clear boundaries
-- Keep content rail compact and readable
-- Preserve asymmetric but intentional column rhythm
+- Keep chat central with a readable, centered message and composer column.
+- Use a quiet left tool rail and compact header; monitoring remains secondary.
+- Keep monitoring gauges compact: 48-by-39-pixel dials with values inside and labels beneath, preserving a roughly 72-pixel desktop header.
+- Open tools in a floating, tabbed right-hand canvas, not in place of chat.
+- The canvas can resize, expand, or close while preserving conversation and tool state. On intermediate widths it overlays chat until dismissed.
+- Phones use chat only: hide the tool rail, canvas, monitoring, and administrative header controls. Keep the composer, saved chats, model selection, attachments, and touch-friendly voice controls accessible, including safe-area/keyboard space. Mobile defaults to browser speech with an explicit service fallback.
+- Preserve the existing dark surfaces, Inter typography, and restrained violet selection accents.
 
 ### Actions
 - Primary action: violet family emphasis

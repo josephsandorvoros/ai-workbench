@@ -32,7 +32,9 @@ import { executeTool } from "../agent/toolExecutor";
 import { compatClient } from "../api/compatClient";
 import { followHermesTurn, hermesLive } from "../api/hermesLiveClient";
 import { fetchSpeechVoices, synthesizeSpeech, transcribeSpeech } from "../api/speechClient";
-import { MAX_SPEECH_RECORDING_BYTES, recordingMimeType, textForSpeech, type SpeechVoice } from "../agent/speech";
+import { MAX_SPEECH_RECORDING_BYTES, MAX_SPEECH_RECORDING_MS, recordingMimeType, textForSpeech, type SpeechVoice } from "../agent/speech";
+import { browserRecognitionConstructor, browserSpeechChunks, startBrowserDictation } from "../agent/browserSpeech";
+import { useMobileChat } from "../lib/useMobileChat";
 import { buildAttachmentPrompt, prepareAttachment, type ChatAttachment } from "../agent/attachments";
 import { loadRemoteWorkbenchState, saveRemoteWorkbenchField } from "../agent/workbenchRemote";
 import {
@@ -83,7 +85,7 @@ const ACTIVE_CHAT_SESSION_KEY = "homelabSpatialWorkbench.activeChatSession.v1";
 const ACTIVE_HERMES_RUNS_KEY = "homelabSpatialWorkbench.activeHermesRuns.v1";
 const SPEECH_REPLIES_STORAGE_KEY = "homelabSpatialWorkbench.speechReplies.v1";
 const SPEECH_VOICE_STORAGE_KEY = "homelabSpatialWorkbench.speechVoice.v1";
-const MAX_SPEECH_RECORDING_MS = 60_000;
+const BROWSER_SPEECH_VOICE_STORAGE_KEY = "homelabSpatialWorkbench.browserSpeechVoice.v1";
 
 interface ActiveHermesRun {
   runId: string;
@@ -343,12 +345,20 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   });
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+  const mobileChat = useMobileChat();
+  const [speechEngineOverride, setSpeechEngineOverride] = useState<"browser" | "service" | null>(null);
+  const speechEngine = speechEngineOverride ?? (mobileChat ? "browser" : "service");
+  const [isStartingSpeech, setIsStartingSpeech] = useState(false);
   const [isRecordingSpeech, setIsRecordingSpeech] = useState(false);
   const [isTranscribingSpeech, setIsTranscribingSpeech] = useState(false);
   const [speechRepliesEnabled, setSpeechRepliesEnabled] = useState(() => {
     try { return window.localStorage.getItem(SPEECH_REPLIES_STORAGE_KEY) === "true"; } catch { return false; }
   });
   const [speechVoices, setSpeechVoices] = useState<SpeechVoice[]>([]);
+  const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [browserSpeechVoice, setBrowserSpeechVoice] = useState(() => {
+    try { return window.localStorage.getItem(BROWSER_SPEECH_VOICE_STORAGE_KEY) || ""; } catch { return ""; }
+  });
   const [selectedSpeechVoice, setSelectedSpeechVoice] = useState(() => {
     try { return window.localStorage.getItem(SPEECH_VOICE_STORAGE_KEY) || "af_heart"; } catch { return "af_heart"; }
   });
@@ -393,10 +403,17 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   const speechSynthesisAbortRef = useRef<AbortController | null>(null);
   const speechAudioRef = useRef<HTMLAudioElement | null>(null);
   const speechObjectUrlRef = useRef<string | null>(null);
+  const browserDictationRef = useRef<ReturnType<typeof startBrowserDictation> | null>(null);
+  const browserUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const speechLifecycleRef = useRef(0);
+  const speechEngineRef = useRef(speechEngine);
+  const browserSpeechVoiceRef = useRef(browserSpeechVoice);
   const speechRepliesEnabledRef = useRef(speechRepliesEnabled);
   const selectedSpeechVoiceRef = useRef(selectedSpeechVoice);
   speechRepliesEnabledRef.current = speechRepliesEnabled;
   selectedSpeechVoiceRef.current = selectedSpeechVoice;
+  speechEngineRef.current = speechEngine;
+  browserSpeechVoiceRef.current = browserSpeechVoice;
   const remoteSessionsLoaded = useRef(false);
   /** Abort controller for the in-flight turn; the Stop button aborts it. */
   const abortRef = useRef<AbortController | null>(null);
@@ -699,6 +716,15 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   }
 
   async function refreshSpeechVoices() {
+    if (speechEngine === "browser") {
+      if (!("speechSynthesis" in window)) {
+        setSpeechNotice("Browser spoken replies are unavailable. Choose Speech service to use the configured server.");
+        return;
+      }
+      setBrowserVoices(window.speechSynthesis.getVoices());
+      setSpeechNotice("Browser voices refreshed.");
+      return;
+    }
     setSpeechNotice("Loading speech voices…");
     try {
       const result = await fetchSpeechVoices();
@@ -714,6 +740,13 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   }
 
   function stopSpeechPlayback() {
+    const utterance = browserUtteranceRef.current;
+    if (utterance) {
+      utterance.onend = null;
+      utterance.onerror = null;
+      browserUtteranceRef.current = null;
+      window.speechSynthesis.cancel();
+    }
     const player = speechAudioRef.current;
     if (player) {
       player.onended = null;
@@ -767,6 +800,47 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
       setSpeechNotice("This reply has no speakable text outside code blocks.");
       return;
     }
+    if (speechEngineRef.current === "browser") {
+      if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+        setSpeechNotice("Browser spoken replies are unavailable. Choose Speech service to use the configured server.");
+        return;
+      }
+      stopSpeechPlayback();
+      const chunks = browserSpeechChunks(text);
+      const voice = window.speechSynthesis.getVoices().find((item) => item.voiceURI === browserSpeechVoiceRef.current);
+      const speakNext = () => {
+        const chunk = chunks.shift();
+        if (!chunk) {
+          browserUtteranceRef.current = null;
+          setPlayingSpeechMessageId(null);
+          return;
+        }
+        const utterance = new SpeechSynthesisUtterance(chunk);
+        if (voice) utterance.voice = voice;
+        utterance.lang = voice?.lang || navigator.language;
+        utterance.onend = () => {
+          if (browserUtteranceRef.current === utterance) speakNext();
+        };
+        utterance.onerror = (event) => {
+          if (browserUtteranceRef.current !== utterance) return;
+          browserUtteranceRef.current = null;
+          setPlayingSpeechMessageId(null);
+          setSpeechNotice(`Browser speech failed (${event.error}). Tap Speak reply to retry or choose Speech service.`);
+        };
+        browserUtteranceRef.current = utterance;
+        setPlayingSpeechMessageId(messageId);
+        setSpeechNotice("");
+        try {
+          window.speechSynthesis.speak(utterance);
+        } catch (error) {
+          browserUtteranceRef.current = null;
+          setPlayingSpeechMessageId(null);
+          setSpeechNotice(error instanceof Error ? `Browser speech failed: ${error.message}` : "Browser speech could not start.");
+        }
+      };
+      speakNext();
+      return;
+    }
     if (speechSynthesisAbortRef.current) return;
     const controller = new AbortController();
     speechSynthesisAbortRef.current = controller;
@@ -780,8 +854,10 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
     } catch (error) {
       if (!controller.signal.aborted) setSpeechNotice(error instanceof Error ? error.message : "Speech synthesis failed");
     } finally {
-      if (speechSynthesisAbortRef.current === controller) speechSynthesisAbortRef.current = null;
-      setSpeechBusyMessageId(null);
+      if (speechSynthesisAbortRef.current === controller) {
+        speechSynthesisAbortRef.current = null;
+        setSpeechBusyMessageId(null);
+      }
     }
   }
 
@@ -794,7 +870,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
       stopSpeechPlayback();
       return;
     }
-    if (speechAudio?.messageId === messageId && speechAudio.voice === selectedSpeechVoiceRef.current) {
+    if (speechEngineRef.current === "service" && speechAudio?.messageId === messageId && speechAudio.voice === selectedSpeechVoiceRef.current) {
       void playSpeechAudio(messageId, speechAudio.blob);
       return;
     }
@@ -802,6 +878,11 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   }
 
   function stopSpeechRecording() {
+    if (browserDictationRef.current) {
+      browserDictationRef.current.stop();
+      setSpeechNotice("Finishing dictation…");
+      return;
+    }
     const recorder = speechRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
     if (speechTimerRef.current !== null) window.clearTimeout(speechTimerRef.current);
@@ -815,20 +896,69 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
       setSpeechNotice("Microphone access requires HTTPS or localhost. Open the dashboard through its secure URL or an SSH tunnel.");
       return;
     }
+    stopSpeechOutput();
+    if (speechEngine === "browser") {
+      const Recognition = browserRecognitionConstructor();
+      if (!Recognition) {
+        setSpeechNotice("Browser dictation is unavailable here. Use your keyboard microphone or choose Speech service.");
+        return;
+      }
+      setIsStartingSpeech(true);
+      setSpeechNotice("Waiting for microphone permission…");
+      const prefix = input.trim();
+      try {
+        browserDictationRef.current = startBrowserDictation(new Recognition(), {
+          language: navigator.language,
+          onStart: () => {
+            setIsStartingSpeech(false);
+            setIsRecordingSpeech(true);
+            setSpeechNotice("Listening live… select Stop when finished.");
+          },
+          onTranscript: (transcript) => {
+            setInput([prefix, transcript].filter(Boolean).join("\n"));
+          },
+          onEnd: (hasTranscript) => {
+            browserDictationRef.current = null;
+            setIsStartingSpeech(false);
+            setIsRecordingSpeech(false);
+            setSpeechNotice(hasTranscript
+              ? "Dictation ended. Review your message, then Send. Tap Talk to continue."
+              : "Dictation ended without a transcript. Tap Talk to try again.");
+          },
+          onError: (message) => {
+            browserDictationRef.current?.abort();
+            browserDictationRef.current = null;
+            setIsStartingSpeech(false);
+            setIsRecordingSpeech(false);
+            setSpeechNotice(message);
+          },
+        });
+      } catch (error) {
+        browserDictationRef.current = null;
+        setIsStartingSpeech(false);
+        setSpeechNotice(error instanceof Error ? `Browser dictation could not start: ${error.message}` : "Browser dictation could not start.");
+      }
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setSpeechNotice("This browser does not support microphone recording.");
       return;
     }
     let acquiredStream: MediaStream | null = null;
+    const lifecycle = speechLifecycleRef.current;
+    setIsStartingSpeech(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
+      if (lifecycle !== speechLifecycleRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       acquiredStream = stream;
       const mime = recordingMimeType();
-      const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      const recorder = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), audioBitsPerSecond: 64_000 });
       speechStreamRef.current = stream;
-      acquiredStream = null;
       speechRecorderRef.current = recorder;
       speechChunksRef.current = [];
       speechRecordingBytesRef.current = 0;
@@ -877,14 +1007,20 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
         }
       };
       recorder.start(500);
+      acquiredStream = null;
+      setIsStartingSpeech(false);
       setIsRecordingSpeech(true);
-      setSpeechNotice("Recording… select Stop to transcribe.");
+      setSpeechNotice("Recording… up to 3 minutes. Select Stop to transcribe.");
       speechTimerRef.current = window.setTimeout(() => {
         setSpeechNotice("Recording limit reached; transcribing the recording.");
         stopSpeechRecording();
       }, MAX_SPEECH_RECORDING_MS);
     } catch (error) {
       acquiredStream?.getTracks().forEach((track) => track.stop());
+      setIsStartingSpeech(false);
+      setIsRecordingSpeech(false);
+      speechRecorderRef.current = null;
+      speechStreamRef.current = null;
       setSpeechNotice(error instanceof Error ? `Microphone unavailable: ${error.message}` : "Microphone access was denied or unavailable.");
     }
   }
@@ -893,12 +1029,20 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
     try {
       window.localStorage.setItem(SPEECH_REPLIES_STORAGE_KEY, String(speechRepliesEnabled));
       window.localStorage.setItem(SPEECH_VOICE_STORAGE_KEY, selectedSpeechVoice);
+      window.localStorage.setItem(BROWSER_SPEECH_VOICE_STORAGE_KEY, browserSpeechVoice);
     } catch {
       // Voice preferences are optional; the speech tokens remain server-side.
     }
-  }, [speechRepliesEnabled, selectedSpeechVoice]);
+  }, [speechRepliesEnabled, selectedSpeechVoice, browserSpeechVoice]);
 
   useEffect(() => {
+    if (speechEngine === "browser") {
+      if (!("speechSynthesis" in window)) return;
+      const update = () => setBrowserVoices(window.speechSynthesis.getVoices());
+      update();
+      window.speechSynthesis.addEventListener("voiceschanged", update);
+      return () => window.speechSynthesis.removeEventListener("voiceschanged", update);
+    }
     let active = true;
     void fetchSpeechVoices().then((result) => {
       if (!active) return;
@@ -911,21 +1055,50 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
       if (active) setSpeechNotice(error instanceof Error ? error.message : "Speech services are not configured.");
     });
     return () => { active = false; };
-  }, []);
+  }, [speechEngine]);
 
-  useEffect(() => () => {
-    if (speechTimerRef.current !== null) window.clearTimeout(speechTimerRef.current);
-    speechTranscriptionAbortRef.current?.abort();
-    speechSynthesisAbortRef.current?.abort();
-    const recorder = speechRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.onstop = null;
-      recorder.stop();
-    }
-    speechStreamRef.current?.getTracks().forEach((track) => track.stop());
-    speechAudioRef.current?.pause();
-    if (speechObjectUrlRef.current) URL.revokeObjectURL(speechObjectUrlRef.current);
-  }, []);
+  useEffect(() => {
+    setIsStartingSpeech(false);
+    setIsRecordingSpeech(false);
+    setIsTranscribingSpeech(false);
+    setSpeechBusyMessageId(null);
+    setPlayingSpeechMessageId(null);
+    setSpeechNotice("");
+    return () => {
+      speechLifecycleRef.current++;
+      browserDictationRef.current?.abort();
+      browserDictationRef.current = null;
+      const utterance = browserUtteranceRef.current;
+      if (utterance) {
+        utterance.onend = null;
+        utterance.onerror = null;
+        browserUtteranceRef.current = null;
+        window.speechSynthesis.cancel();
+      }
+      if (speechTimerRef.current !== null) window.clearTimeout(speechTimerRef.current);
+      speechTimerRef.current = null;
+      speechTranscriptionAbortRef.current?.abort();
+      speechSynthesisAbortRef.current?.abort();
+      speechSynthesisAbortRef.current = null;
+      const recorder = speechRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.onstop = null;
+        recorder.stop();
+      }
+      speechStreamRef.current?.getTracks().forEach((track) => track.stop());
+      const player = speechAudioRef.current;
+      if (player) {
+        player.onended = null;
+        player.onerror = null;
+        player.pause();
+      }
+      if (speechObjectUrlRef.current) URL.revokeObjectURL(speechObjectUrlRef.current);
+      speechAudioRef.current = null;
+      speechObjectUrlRef.current = null;
+      speechRecorderRef.current = null;
+      speechStreamRef.current = null;
+    };
+  }, [speechEngine]);
 
   useEffect(() => {
     void loadRemoteWorkbenchState().then((state) => {
@@ -1007,8 +1180,14 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   useEffect(() => {
     const handleLoad = (event: Event) => {
       if (isThinking) return;
+      if (isStartingSpeech || isRecordingSpeech || isTranscribingSpeech) {
+        setSpeechNotice("Finish dictation or transcription before loading another chat.");
+        return;
+      }
       const session = (event as CustomEvent<SavedChatSession>).detail;
       if (!session) return;
+      speechSynthesisAbortRef.current?.abort();
+      stopSpeechPlayback();
       setActiveSessionId(session.id);
       setLastTurnInputTokens(null);
       setGatewayContext(null);
@@ -1019,10 +1198,12 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
     };
     window.addEventListener(LOAD_CHAT_SESSION_EVENT, handleLoad);
     return () => window.removeEventListener(LOAD_CHAT_SESSION_EVENT, handleLoad);
-  }, [isThinking]);
+  }, [isThinking, isStartingSpeech, isRecordingSpeech, isTranscribingSpeech]);
 
   function handleNewChat() {
-    if (isThinking) return;
+    if (isThinking || isStartingSpeech || isRecordingSpeech || isTranscribingSpeech) return;
+    speechSynthesisAbortRef.current?.abort();
+    stopSpeechPlayback();
     const nextId = createChatSessionId();
     setActiveSessionId(nextId);
     setLastTurnInputTokens(null);
@@ -1036,7 +1217,9 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   }
 
   function handleLoadChat(session: SavedChatSession) {
-    if (isThinking) return;
+    if (isThinking || isStartingSpeech || isRecordingSpeech || isTranscribingSpeech) return;
+    speechSynthesisAbortRef.current?.abort();
+    stopSpeechPlayback();
     setActiveSessionId(session.id);
     setLastTurnInputTokens(null);
     setGatewayContext(null);
@@ -1260,7 +1443,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   async function sendMessage(overrideText?: string) {
     const attachments = overrideText === undefined ? pendingAttachments : [];
     const rawText = (overrideText ?? input).trim() || (attachments.length > 0 ? "Please look at the attached files." : "");
-    if (!rawText || isThinking || uploadingCount > 0 || isRecordingSpeech || isTranscribingSpeech) return;
+    if (!rawText || isThinking || uploadingCount > 0 || isStartingSpeech || isRecordingSpeech || isTranscribingSpeech) return;
 
     // A Hermes command can resolve to a prompt (skills, /plan, /queue, ...) that runs as a normal turn.
     let commandPrompt: string | null = null;
@@ -1657,7 +1840,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
     <section className="agent-chat" aria-label="Agent chat">
       <header className="agent-chat-header">
         <div className="agent-chat-title">
-          <h3>Agent</h3>
+          <h3>Chat</h3>
           <span className="agent-chat-provider" title="Live provider — switch it in Agent Workbench">
             {label}
           </span>
@@ -1708,10 +1891,10 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
             </span>
           )}
           <div className="agent-chat-actions">
-            <button className="btn secondary small" type="button" onClick={handleNewChat} disabled={isThinking}>
+            <button className="btn secondary small" type="button" onClick={handleNewChat} disabled={isThinking || isStartingSpeech || isRecordingSpeech || isTranscribingSpeech}>
               New chat
             </button>
-            <button className="btn secondary small" type="button" onClick={() => setShowSavedChats((visible) => !visible)}>
+            <button className="btn secondary small" type="button" disabled={isStartingSpeech || isRecordingSpeech || isTranscribingSpeech} onClick={() => setShowSavedChats((visible) => !visible)}>
               Load chat
             </button>
             <button
@@ -1719,6 +1902,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
               type="button"
               title="Clear conversation"
               aria-label="Clear conversation"
+              disabled={isStartingSpeech || isRecordingSpeech || isTranscribingSpeech}
               onClick={() => setMessages([])}
             >
               <Icon name="x" size={15} />
@@ -1754,20 +1938,13 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
 
       <div className="agent-chat-messages" ref={scrollRef} role="log" aria-label="Chat messages" onScroll={handleMessagesScroll}>
         {messages.length === 0 && !isThinking ? (
-          <div className="chat-msg chat-msg-assistant">
-            <div className="chat-msg-meta">
-              <span className="chat-msg-role">Agent</span>
-            </div>
-            <div className="chat-msg-content md">
-              <p>
-                Agent chat is wired to <strong>{label}</strong>. Send a message to talk to it.
-                Switch harnesses or endpoints live from Agent Workbench.
-              </p>
-              <p className="muted">
-                Type <code className="md-inline-code">/</code> for commands &amp; skills, or{" "}
-                <code className="md-inline-code">@</code> to attach context (upload, board, files, web, notes). You can also paste or drop files here.
-              </p>
-            </div>
+          <div className="chat-empty">
+            <h2>What are we working on?</h2>
+            <p>Ask a question, explore an idea, or build something.</p>
+            <p className="chat-empty-hint">
+              Type <code>/</code> for commands or <code>@</code> to add context.
+              {mobileChat ? " Paste or attach files for context." : " Open a tool in the canvas when you need more room."}
+            </p>
           </div>
         ) : (
           messages.map((message, index) => {
@@ -1843,15 +2020,15 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
                     <button
                       className="chat-msg-action"
                       type="button"
-                      title={playingSpeechMessageId === message.id ? "Stop spoken reply" : speechAudio?.messageId === message.id ? "Play spoken reply" : "Speak reply"}
-                      aria-label={playingSpeechMessageId === message.id ? "Stop spoken reply" : speechAudio?.messageId === message.id ? "Play spoken reply" : "Speak reply"}
+                      title={playingSpeechMessageId === message.id ? "Stop spoken reply" : speechEngine === "service" && speechAudio?.messageId === message.id ? "Play spoken reply" : "Speak reply"}
+                      aria-label={playingSpeechMessageId === message.id ? "Stop spoken reply" : speechEngine === "service" && speechAudio?.messageId === message.id ? "Play spoken reply" : "Speak reply"}
                       disabled={speechBusyMessageId === message.id}
                       onClick={() => {
                         if (playingSpeechMessageId === message.id) stopSpeechPlayback();
                         else void handleSpeechMessage(message.id, message.content);
                       }}
                     >
-                      <Icon name={playingSpeechMessageId === message.id ? "stop" : speechAudio?.messageId === message.id ? "play" : "speaker"} size={14} />
+                      <Icon name={playingSpeechMessageId === message.id ? "stop" : speechEngine === "service" && speechAudio?.messageId === message.id ? "play" : "speaker"} size={14} />
                     </button>
                   ) : null}
                   {isLastAssistant && !isThinking ? (
@@ -2021,8 +2198,9 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
             ref={inputRef}
             className="agent-chat-input"
             rows={2}
-            placeholder="Message the agent… (type / for commands, @ for context, Shift+Enter for newline)"
+            placeholder={mobileChat ? "Message the agent…" : "Message the agent… (type / for commands, @ for context, Shift+Enter for newline)"}
             value={input}
+            readOnly={speechEngine === "browser" && (isStartingSpeech || isRecordingSpeech)}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
@@ -2034,6 +2212,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
               type="button"
               title="Add context or upload files (@)"
               aria-label="Add context"
+              disabled={isStartingSpeech || isRecordingSpeech}
               onClick={() => {
                 setInput((current) => current.replace(/@([^\s@]*)$/, "") + "@");
                 inputRef.current?.focus();
@@ -2059,7 +2238,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
               className="agent-chat-send"
               type="button"
               onClick={() => void sendMessage()}
-              disabled={(!input.trim() && pendingAttachments.length === 0) || isThinking || uploadingCount > 0 || isRecordingSpeech || isTranscribingSpeech}
+              disabled={(!input.trim() && pendingAttachments.length === 0) || isThinking || uploadingCount > 0 || isStartingSpeech || isRecordingSpeech || isTranscribingSpeech}
               aria-label="Send message"
             >
               ↑
@@ -2069,21 +2248,35 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
             <button
               className={`agent-chat-speech-mic${isRecordingSpeech ? " recording" : ""}`}
               type="button"
-              disabled={!window.isSecureContext || isThinking || isTranscribingSpeech}
-              title={!window.isSecureContext ? "Microphone access requires HTTPS or localhost" : isRecordingSpeech ? "Stop recording and transcribe" : "Push to talk"}
-              aria-label={isRecordingSpeech ? "Stop recording and transcribe" : "Start microphone recording"}
+              disabled={!window.isSecureContext || isStartingSpeech || (isThinking && !isRecordingSpeech) || isTranscribingSpeech}
+              title={!window.isSecureContext ? "Microphone access requires HTTPS or localhost" : isRecordingSpeech ? "Stop dictation" : speechEngine === "browser" ? "Start live browser dictation" : "Record up to 3 minutes"}
+              aria-label={isRecordingSpeech ? "Stop dictation" : "Start microphone recording"}
               onClick={() => isRecordingSpeech ? stopSpeechRecording() : void startSpeechRecording()}
             >
               <Icon name={isRecordingSpeech ? "stop" : "microphone"} size={15} />
-              <span>{isRecordingSpeech ? "Stop" : "Talk"}</span>
+              <span>{isStartingSpeech ? "Starting…" : isRecordingSpeech ? "Stop" : "Talk"}</span>
             </button>
-            <label className="agent-chat-voice-select-label" title={speechVoices.length ? "Voice for spoken replies" : "Voice catalogue is empty; af_heart is an unverified fallback"}>
+            <label className="agent-chat-voice-select-label">
+              <span>Speech</span>
+              <select aria-label="Speech engine" value={speechEngine} disabled={isStartingSpeech || isRecordingSpeech || isTranscribingSpeech} onChange={(event) => {
+                if (event.target.value === "browser" || event.target.value === "service") setSpeechEngineOverride(event.target.value);
+              }}>
+                <option value="browser">Browser</option>
+                <option value="service">Speech service</option>
+              </select>
+            </label>
+            <label className="agent-chat-voice-select-label" title="Voice for spoken replies">
               <span>Voice</span>
-              <select aria-label="Spoken reply voice" value={selectedSpeechVoice} onChange={(event) => setSelectedSpeechVoice(event.target.value)}>
+              {speechEngine === "browser" ? (
+                <select aria-label="Spoken reply voice" value={browserSpeechVoice} onChange={(event) => setBrowserSpeechVoice(event.target.value)}>
+                  <option value="">System default</option>
+                  {browserVoices.map((voice) => <option key={voice.voiceURI} value={voice.voiceURI}>{voice.name} ({voice.lang})</option>)}
+                </select>
+              ) : <select aria-label="Spoken reply voice" value={selectedSpeechVoice} onChange={(event) => setSelectedSpeechVoice(event.target.value)}>
                 {speechVoices.length > 0
                   ? speechVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)
                   : <option value={selectedSpeechVoice}>{selectedSpeechVoice} (not listed)</option>}
-              </select>
+              </select>}
             </label>
             <label className="agent-chat-speech-toggle" title="Automatically speak completed assistant replies">
               <input type="checkbox" checked={speechRepliesEnabled} onChange={(event) => {
@@ -2101,6 +2294,11 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
             </button>
             {(playingSpeechMessageId || speechBusyMessageId) && <button className="agent-chat-speech-refresh" type="button" title="Stop spoken reply" aria-label="Stop spoken reply" onClick={stopSpeechOutput}><Icon name="stop" size={14} /></button>}
           </div>
+          {speechEngine === "browser" && <div className="agent-chat-speech-notice">
+            {browserRecognitionConstructor()
+              ? "Browser speech may use your browser vendor's online services. Review dictation before sending."
+              : "Browser dictation is unavailable. Use your keyboard microphone or choose Speech service."}
+          </div>}
           {!window.isSecureContext && <div className="agent-chat-speech-notice" role="status">Microphone access requires HTTPS or localhost.</div>}
           {speechNotice && <div className="agent-chat-speech-notice" role="status">{speechNotice}</div>}
         </div>

@@ -10,7 +10,7 @@ An installed skill is not a guarantee it will be used on every request. The sele
 
 ## Sessions
 
-Use **Load chat** in the Agent panel to revisit a saved Workbench conversation. In the sessions view, select an agent session to inspect it; where supported, **Save** makes a saved-chat copy and **Load session** opens that copy in the Agent panel.
+Use **Load chat** in the central chat to revisit a saved Workbench conversation. Open **Sessions** from the left navigation to inspect agent sessions in the canvas; where supported, **Save** makes a saved-chat copy and **Load session** opens that copy in the central chat. On narrow screens, close the canvas to see the loaded conversation.
 
 Loading a transcript is not the same as resuming every internal state of the original harness. An active worker, terminal process, or external chat integration may have a different session.
 
