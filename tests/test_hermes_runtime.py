@@ -1,11 +1,14 @@
+import json
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+import venv
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_runtime import RuntimeManager, UPSTREAM, atomic_json, supervise
+from hermes_runtime import DISCORD_CHECK, PM_METADATA, RuntimeManager, UPSTREAM, atomic_json, supervise
 
 
 class HermesRuntimeTests(unittest.TestCase):
@@ -116,12 +119,120 @@ class HermesRuntimeTests(unittest.TestCase):
                 release = manager.prepare("v1.2.3")
             self.assertTrue((manager.root / "releases" / release / "workbench-release.json").is_file())
             self.assertEqual(manager.selection()["current"], "image")
-            self.assertIn("import hermes_cli.main; import gateway.run", commands[-2])
-            stamp_command = commands[-3]
+            self.assertIn("import hermes_cli.main; import gateway.run", commands[-3])
+            self.assertIn(DISCORD_CHECK, commands[-2])
+            sync_command = next(command for command in commands if command[:2] == ["uv", "sync"])
+            self.assertEqual([sync_command[i + 1] for i, arg in enumerate(sync_command) if arg == "--extra"],
+                             ["all", "discord"])
+            stamp_command = next(command for command in commands if str(command[1]).endswith("write_install_stamp.py"))
             self.assertEqual(stamp_command[1], str(manager.runtime_path(release) / "scripts/write_install_stamp.py"))
             self.assertEqual(stamp_command[stamp_command.index("--base-version") + 1], "1.2.3")
             self.assertEqual(stamp_command[stamp_command.index("--commit") + 1], "a" * 40)
             self.assertEqual(stamp_command[stamp_command.index("--update-mechanism") + 1], "external")
+
+    def test_discord_import_failure_rejects_release_before_selection(self):
+        with tempfile.TemporaryDirectory() as home:
+            manager = self.manager(home)
+
+            def run(command, cwd=None, timeout=None):
+                if command[:2] == ["git", "clone"]:
+                    target = Path(command[-1])
+                    (target / ".git").mkdir(parents=True)
+                    (target / ".git/HEAD").write_text("a" * 40)
+                    (target / "uv.lock").touch()
+                if DISCORD_CHECK in command:
+                    raise subprocess.CalledProcessError(1, command)
+
+            with patch.object(manager, "_run", side_effect=run), self.assertRaises(subprocess.CalledProcessError):
+                manager.prepare("v1.2.3")
+            self.assertEqual(manager.selection()["current"], "image")
+            self.assertEqual(list((manager.root / "releases").iterdir()), [])
+
+    def test_packaged_release_prepares_and_checks_its_own_pm_runtime(self):
+        with tempfile.TemporaryDirectory() as home:
+            manager = self.manager(home)
+            commands = []
+
+            def run(command, cwd=None, timeout=None):
+                commands.append(command)
+                if command[:2] == ["git", "clone"]:
+                    target = Path(command[-1])
+                    (target / ".git").mkdir(parents=True)
+                    (target / ".git/HEAD").write_text("a" * 40)
+                    (target / "uv.lock").touch()
+                    (target / "scripts").mkdir()
+                    (target / "scripts/write_install_stamp.py").touch()
+                    (target / "pm").mkdir()
+                    (target / "pm/pyproject.toml").touch()
+                    (target / "pm/uv.lock").touch()
+
+            with patch.object(manager, "_run", side_effect=run):
+                release = manager.prepare("v1.2.3")
+            target = manager.runtime_path(release)
+            pm_sync = next(command for command in commands if "--project" in command)
+            self.assertIn(str(target / "pm"), pm_sync)
+            self.assertIn("--frozen", pm_sync)
+            metadata = next(command for command in commands if PM_METADATA in command)
+            self.assertEqual(metadata[0], str(target / "pm/.venv/bin/python"))
+            self.assertEqual(metadata[-1], str(target / "install-stamp.json"))
+            self.assertTrue(any("bootstrap=False" in str(command) for command in commands))
+
+    def test_pm_metadata_points_to_runnable_independent_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "pm/.venv"
+            venv.EnvBuilder(with_pip=False).create(runtime)
+            stamp = Path(directory) / "install-stamp.json"
+            atomic_json(stamp, {"distribution": "docker", "updateMechanism": "external"})
+            subprocess.run([str(runtime / "bin/python"), "-c", PM_METADATA, str(stamp)], check=True)
+            metadata = json.loads((runtime / "pm-runtime.json").read_text())
+            self.assertEqual(json.loads(stamp.read_text())["pmRuntime"], str(runtime))
+            python = (runtime / metadata["python"]).resolve()
+            site = runtime / metadata["sitePackages"]
+            (site / "pm_probe.py").write_text("ready = True\n")
+            subprocess.run([str(python), "-I", "-S", "-c",
+                            "import sys; sys.path.insert(0, sys.argv[1]); import pm_probe; assert pm_probe.ready",
+                            str(site)], check=True)
+            self.assertEqual(json.loads(stamp.read_text())["updateMechanism"], "external")
+
+    def test_preparation_failure_keeps_dependency_diagnostics(self):
+        with tempfile.TemporaryDirectory() as home:
+            manager = self.manager(home)
+            with self.assertRaises(subprocess.CalledProcessError):
+                manager._run([sys.executable, "-c", "import sys; sys.stderr.write('missing SDK'); sys.exit(1)"])
+            log = manager.root / "preparation.log"
+            self.assertIn("missing SDK", log.read_text())
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_cli_restart_uses_workbench_supervisor_not_upstream_s6_profiles(self):
+        with tempfile.TemporaryDirectory() as home:
+            for arguments in (["gateway", "restart"], ["gateway", "restart", "--detach"]):
+                with self.subTest(arguments=arguments), \
+                        patch.dict("os.environ", {"HERMES_HOME": home, "WORKBENCH_HERMES_MANAGED": "1"}), \
+                        patch.object(RuntimeManager, "restart_gateway") as restart, \
+                        patch("hermes_runtime.os.execve") as execute:
+                    from hermes_runtime import exec_cli
+                    exec_cli(arguments)
+                    restart.assert_called_once_with(detach="--detach" in arguments)
+                    execute.assert_not_called()
+
+    def test_detached_restart_records_request_without_selecting_another_runtime(self):
+        with tempfile.TemporaryDirectory() as home:
+            manager = self.manager(home)
+            selection = manager.selection()
+            atomic_json(manager.root / "gateway.json", {"state": "running", "pid": 100,
+                                                       "updated_at": time.time()})
+            with patch("builtins.print"):
+                manager.restart_gateway(detach=True)
+            self.assertTrue(json.loads((manager.root / "gateway-restart.json").read_text())["id"])
+            self.assertEqual(manager.selection(), selection)
+
+    def test_restart_rejects_stale_supervisor_without_writing_request(self):
+        with tempfile.TemporaryDirectory() as home:
+            manager = self.manager(home)
+            atomic_json(manager.root / "gateway.json", {"state": "running", "updated_at": time.time() - 60})
+            with self.assertRaisesRegex(ValueError, "supervisor is not running"):
+                manager.restart_gateway(detach=True)
+            self.assertFalse((manager.root / "gateway-restart.json").exists())
 
     def test_health_requires_both_selected_service_generations(self):
         with tempfile.TemporaryDirectory() as home:
@@ -312,3 +423,33 @@ class HermesRuntimeTests(unittest.TestCase):
             with patch.dict("os.environ", {"HERMES_HOME": home, "HERMES_INSTALL_ROOT": "/old-image"}), patch("hermes_runtime.signal.signal", side_effect=lambda signum, handler: handlers.update({signum: handler})), patch("hermes_runtime.subprocess.Popen", side_effect=launch), patch("hermes_runtime.os.killpg"):
                 supervise("gateway")
             child.wait.assert_called()
+
+    def test_gateway_restart_request_is_consumed_by_existing_supervisor(self):
+        with tempfile.TemporaryDirectory() as home:
+            manager = self.manager(home)
+            handlers = {}
+            children = []
+
+            def launch(command, **kwargs):
+                child = unittest.mock.Mock()
+                child.pid = 200 + len(children)
+                child.poll.return_value = None
+                children.append(child)
+                if len(children) == 1:
+                    child.poll.side_effect = request_restart
+                else:
+                    handlers[__import__("signal").SIGTERM](None, None)
+                return child
+
+            def request_restart():
+                atomic_json(manager.root / "gateway-restart.json", {"id": "request-1"})
+                return None
+
+            with patch.dict("os.environ", {"HERMES_HOME": home}), \
+                    patch("hermes_runtime.signal.signal", side_effect=lambda signum, handler: handlers.update({signum: handler})), \
+                    patch("hermes_runtime.subprocess.Popen", side_effect=launch), \
+                    patch("hermes_runtime.os.killpg") as terminate:
+                supervise("gateway")
+            self.assertEqual(len(children), 2)
+            self.assertEqual(terminate.call_args_list[0].args[0], children[0].pid)
+            self.assertEqual(manager.selection()["current"], "image")

@@ -21,6 +21,23 @@ from urllib.request import urlopen
 UPSTREAM = "https://github.com/NousResearch/hermes-agent.git"
 TAG_PATTERN = re.compile(r"v?\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9][A-Za-z0-9.-]{0,60})?")
 
+PM_METADATA = """
+import json, os, sys, sysconfig
+from pathlib import Path
+runtime = Path(sys.prefix)
+site = Path(sysconfig.get_path("purelib"))
+(runtime / "pm-runtime.json").write_text(json.dumps({
+    "python": os.path.relpath(Path(sys.executable).resolve(), runtime),
+    "sitePackages": os.path.relpath(site, runtime),
+}))
+stamp_path = Path(sys.argv[1])
+stamp = json.loads(stamp_path.read_text())
+stamp["pmRuntime"] = str(runtime)
+stamp_path.write_text(json.dumps(stamp))
+"""
+
+DISCORD_CHECK = "import discord; from discord import Message, Intents; from discord.ext import commands"
+
 
 def atomic_json(path, data):
     path = Path(path)
@@ -141,8 +158,11 @@ class RuntimeManager:
                                    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}}
         environment.update(HOME=str(build_home), HERMES_HOME=str(build_home), GIT_TERMINAL_PROMPT="0",
                            UV_NO_PROGRESS="1", UV_PYTHON_DOWNLOADS="never")
-        subprocess.run(command, cwd=cwd, env=environment, check=True, timeout=timeout,
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log_path = self.root / "preparation.log"
+        descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a") as log:
+            subprocess.run(command, cwd=cwd, env=environment, check=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, stdout=log, stderr=log)
 
     def prepare(self, tag):
         if not isinstance(tag, str) or not TAG_PATTERN.fullmatch(tag):
@@ -159,7 +179,9 @@ class RuntimeManager:
             if not (target / "uv.lock").is_file():
                 raise ValueError("This release has no dependency lock; it cannot be installed safely")
             image_python = self.env.get("HERMES_IMAGE_PYTHON", "/opt/hermes/.venv/bin/python")
-            self._run(["uv", "sync", "--frozen", "--no-dev", "--extra", "all", "--python", image_python], cwd=target, timeout=1800)
+            # Upstream's "all" extra excludes opt-in messaging SDKs.
+            self._run(["uv", "sync", "--frozen", "--no-dev", "--extra", "all",
+                       "--extra", "discord", "--python", image_python], cwd=target, timeout=1800)
             commit = (target / ".git/HEAD").read_text().strip()
             if not re.fullmatch(r"[a-f0-9]{40,64}", commit):
                 raise ValueError("The staged release did not resolve to a pinned commit")
@@ -170,8 +192,24 @@ class RuntimeManager:
                            "--commit", commit, "--base-version", tag.removeprefix("v"),
                            "--distance", "0", "--distribution", "docker",
                            "--update-mechanism", "external"], cwd=target)
+                pm_project = target / "pm"
+                if (pm_project / "pyproject.toml").is_file():
+                    if not (pm_project / "uv.lock").is_file():
+                        raise ValueError("This release has no PM dependency lock")
+                    self.progress("running", "Preparing the release's independent package manager")
+                    self._run(["uv", "sync", "--frozen", "--no-dev", "--project", str(pm_project),
+                               "--python", image_python], cwd=target, timeout=1800)
+                    self._run([str(pm_project / ".venv/bin/python"), "-c", PM_METADATA,
+                               str(target / "install-stamp.json")], cwd=target)
+                    self._run([str(target / ".venv/bin/python"), "-c",
+                               "from pm.runtime import runtime_command, runtime_environment; "
+                               "import subprocess; "
+                               "from pm.paths import repo_root; "
+                               "command = runtime_command(repo_root() / 'pm/launch.py', ['--help'], bootstrap=False); "
+                               "subprocess.run(command, env=runtime_environment(), check=True)"], cwd=target)
             self.progress("running", "Checking the staged Hermes runtime")
             self._run([str(target / ".venv/bin/python"), "-c", "import hermes_cli.main; import gateway.run"], cwd=target)
+            self._run([str(target / ".venv/bin/python"), "-c", DISCORD_CHECK], cwd=target)
             self._run([str(target / ".venv/bin/hermes"), "--version"], cwd=target)
             atomic_json(target / "workbench-release.json", {"tag": tag, "commit": commit, "installed_at": time.time()})
             return release_name
@@ -325,7 +363,10 @@ class RuntimeManager:
                 self.activate(target, before_restart)
                 self.progress("succeeded", "Hermes is running and both services passed health checks")
             except Exception as failure:
-                message = str(failure) if isinstance(failure, ValueError) else "Hermes operation failed during preparation; the selected runtime was not changed"
+                message = str(failure) if isinstance(failure, ValueError) else (
+                    "Hermes preparation failed; the selected runtime was not changed. "
+                    f"See {self.root / 'preparation.log'} for dependency/import errors."
+                )
                 self.progress("failed", message)
             finally:
                 guard.__exit__(None, None, None)
@@ -337,6 +378,29 @@ class RuntimeManager:
             guard.__exit__(*sys.exc_info())
             raise
         return {"ok": True, **self.status()}
+
+    def restart_gateway(self, detach=False):
+        with self.lock():
+            service = read_json(self.root / "gateway.json", {})
+            if service.get("state") != "running" or time.time() - service.get("updated_at", 0) > 10:
+                raise ValueError("The Workbench gateway supervisor is not running")
+            request_id = uuid.uuid4().hex
+            atomic_json(self.root / "gateway-restart.json", {"id": request_id})
+        if detach:
+            print("Gateway restart requested through the Workbench supervisor")
+            return
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            replacement = read_json(self.root / "gateway.json", {})
+            gateway = read_json(self.home / "gateway_state.json", {})
+            if (replacement.get("restart_id") == request_id
+                    and replacement.get("state") == "running"
+                    and gateway.get("gateway_state") == "running"
+                    and gateway.get("pid") == replacement.get("pid")):
+                print("Gateway restarted through the Workbench supervisor")
+                return
+            threading.Event().wait(1)
+        raise ValueError("Gateway restart did not become ready; check the gateway log")
 
 
 def supervise(role):
@@ -350,6 +414,7 @@ def supervise(role):
             stopping.wait(1)
             continue
         selected = manager.selection()
+        restart_id = read_json(manager.root / "gateway-restart.json", {}).get("id")
         runtime = manager.runtime_path(selected["current"])
         environment = dict(os.environ, HERMES_AGENT_DIR=str(runtime), HERMES_PYTHON=str(runtime / ".venv/bin/python"),
                    HERMES_INSTALL_DIR=str(runtime), HERMES_INSTALL_ROOT=str(runtime), VIRTUAL_ENV=str(runtime / ".venv"),
@@ -361,8 +426,10 @@ def supervise(role):
         try:
             while child.poll() is None and not stopping.is_set():
                 atomic_json(manager.root / f"{role}.json", {"generation": selected["generation"], "state": "running",
-                            "pid": child.pid, "updated_at": time.time()})
+                            "pid": child.pid, "updated_at": time.time(), "restart_id": restart_id})
                 if manager.selection()["generation"] != selected["generation"] or (manager.root / "paused.json").exists():
+                    break
+                if role == "gateway" and read_json(manager.root / "gateway-restart.json", {}).get("id") != restart_id:
                     break
                 stopping.wait(1)
         finally:
@@ -382,6 +449,9 @@ def supervise(role):
 def exec_cli(arguments):
     manager = RuntimeManager(os.getenv("HERMES_HOME", "/opt/data"))
     manager.recover_interrupted_activation()
+    if manager.supported and arguments in (["gateway", "restart"], ["gateway", "restart", "--detach"]):
+        manager.restart_gateway(detach="--detach" in arguments)
+        return
     runtime = manager.runtime_path()
     environment = dict(os.environ, HERMES_AGENT_DIR=str(runtime), HERMES_PYTHON=str(runtime / ".venv/bin/python"),
                        HERMES_INSTALL_DIR=str(runtime), HERMES_INSTALL_ROOT=str(runtime), VIRTUAL_ENV=str(runtime / ".venv"))
