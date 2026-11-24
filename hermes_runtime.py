@@ -30,13 +30,32 @@ site = Path(sysconfig.get_path("purelib"))
     "python": os.path.relpath(Path(sys.executable).resolve(), runtime),
     "sitePackages": os.path.relpath(site, runtime),
 }))
-stamp_path = Path(sys.argv[1])
-stamp = json.loads(stamp_path.read_text())
-stamp["pmRuntime"] = str(runtime)
-stamp_path.write_text(json.dumps(stamp))
 """
 
 DISCORD_CHECK = "import discord; from discord import Message, Intents; from discord.ext import commands"
+
+PM_CHECK = """
+from pathlib import Path
+import subprocess
+from pm.runtime import runtime_command, runtime_environment
+command = runtime_command(Path.cwd() / 'pm/launch.py', ['--help'], bootstrap=False)
+subprocess.run(command, env=runtime_environment(), check=True)
+"""
+
+PM_INSTALL_DISCORD = """
+import sys
+from pm.runtime import run_cli
+sys.exit(run_cli(['install', '--extra', 'discord']))
+"""
+
+SELECTED_PYTHON = """
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from pm.environments import selected_venv, venv_python
+print(json.dumps(str(venv_python(selected_venv(root)))))
+"""
 
 
 def atomic_json(path, data):
@@ -81,30 +100,125 @@ class RuntimeManager:
             raise ValueError("Invalid managed runtime selection")
         return self.root / "releases" / selected
 
+    def runtime_environment(self, runtime, base=None, python=None):
+        environment = dict(self.env if base is None else base)
+        binaries = Path(python).parent if python else runtime / ".venv/bin"
+        environment.update(
+            HOME=str(self.home), HERMES_HOME=str(self.home),
+            HERMES_AGENT_DIR=str(runtime), HERMES_INSTALL_DIR=str(runtime),
+            HERMES_INSTALL_ROOT=str(runtime), HERMES_PYTHON=str(python or binaries / "python"),
+            VIRTUAL_ENV=str(binaries.parent), PYTHONPATH=str(runtime),
+        )
+        environment["PATH"] = str(binaries) + os.pathsep + environment.get("PATH", "")
+        return environment
+
+    def runtime_command(self, runtime, arguments):
+        if not (runtime / "pm/environments.py").is_file():
+            return [str(runtime / ".venv/bin/hermes"), *arguments]
+        # PM can replace the bootstrap .venv with a committed dependency generation.
+        python = self.env.get("HERMES_IMAGE_PYTHON", str(self.runtime_path("image") / ".venv/bin/python"))
+        result = subprocess.run(
+            [python, "-I", "-S", "-c", SELECTED_PYTHON, str(runtime)],
+            cwd=self.home, env=self.runtime_environment(runtime),
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        selected = Path(json.loads(result.stdout))
+        if not selected.is_absolute() or not selected.is_file():
+            raise ValueError("Selected Hermes dependency interpreter is missing")
+        return [str(selected), "-m", "hermes_cli.main", *arguments]
+
+    def discord_enabled(self):
+        from hermes_config import read_config
+
+        config = read_config(self.home)
+        discord = (config.get("platforms") or {}).get("discord") or {}
+        if "enabled" in discord:
+            return discord["enabled"] is True
+        if self.env.get("DISCORD_BOT_TOKEN", "").strip():
+            return True
+        env_file = self.home / ".env"
+        if env_file.is_file():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                key, separator, value = line.strip().removeprefix("export ").partition("=")
+                if separator and key.strip() == "DISCORD_BOT_TOKEN" and value.strip().strip("\"'"):
+                    return True
+        return False
+
+    def discord_ready(self, gateway):
+        if not self.discord_enabled():
+            return True
+        discord = gateway.get("platforms", {}).get("discord", {})
+        return discord.get("state") == "connected" and discord.get("writer_pid") == gateway.get("pid")
+
+    def validate_pm_runtime(self, runtime):
+        marker = read_json(runtime / "pm-runtime.json", {})
+        if not all(isinstance(marker.get(key), str) and marker[key] for key in ("python", "sitePackages")):
+            raise ValueError("Packaged PM runtime metadata is missing or invalid")
+        python = (runtime / marker["python"]).resolve()
+        site = (runtime / marker["sitePackages"]).resolve()
+        if not python.is_file() or not os.access(python, os.X_OK) or not site.is_dir():
+            raise ValueError("Packaged PM interpreter or dependencies are missing")
+        self._run([str(python), "-I", "-S", "-c",
+                   "import sys; sys.path.insert(0, sys.argv[1]); "
+                   "import packaging, tomli_w, truststore; from ruamel.yaml import YAML",
+                   str(site)])
+
+    def prepare_pm_runtime(self, target, image_python):
+        project = target / "pm"
+        if not all((project / name).is_file() for name in ("pyproject.toml", "uv.lock")):
+            raise ValueError("This release has no locked PM runtime project")
+        image = self.runtime_path("image")
+        matching = all((image / "pm" / name).is_file()
+                       and (image / "pm" / name).read_bytes() == (project / name).read_bytes()
+                       for name in ("pyproject.toml", "uv.lock"))
+        packaged = read_json(image / "install-stamp.json", {}).get("pmRuntime")
+        if matching and isinstance(packaged, str) and Path(packaged).is_absolute():
+            runtime = Path(packaged)
+            self.validate_pm_runtime(runtime)
+        else:
+            self._run(["uv", "sync", "--frozen", "--no-dev", "--project", str(project),
+                       "--python", image_python], cwd=target, timeout=1800)
+            runtime = project / ".venv"
+            self._run([str(runtime / "bin/python"), "-c", PM_METADATA], cwd=target)
+            self.validate_pm_runtime(runtime)
+        stamp_path = target / "install-stamp.json"
+        stamp = read_json(stamp_path, {})
+        if stamp.get("distribution") != "docker":
+            raise ValueError("The staged release is missing its Docker install stamp")
+        atomic_json(stamp_path, {**stamp, "pmRuntime": str(runtime.resolve())})
+        self._run([str(target / ".venv/bin/python"), "-c", PM_CHECK], cwd=target, runtime=target)
+
     def runtime_available(self, selected):
-        if selected == "image":
+        if selected == "image" and not (self.runtime_path("image") / "pm/runtime.py").is_file():
             return True
         try:
             binaries = self.runtime_path(selected) / ".venv" / "bin"
         except (ValueError, TypeError):
             return False
-        python = binaries / "python"
-        hermes = binaries / "hermes"
-        if not all(path.is_file() and os.access(path, os.X_OK) for path in (python, hermes)):
+        runtime = binaries.parent.parent
+        try:
+            command = self.runtime_command(runtime, ["--version"])
+        except (OSError, ValueError, subprocess.SubprocessError):
             return False
-        environment = dict(self.env)
-        environment.update(
-            HERMES_AGENT_DIR=str(binaries.parent.parent),
-            HERMES_PYTHON=str(python),
-            HERMES_INSTALL_DIR=str(binaries.parent.parent),
-            HERMES_INSTALL_ROOT=str(binaries.parent.parent),
-            VIRTUAL_ENV=str(binaries.parent.parent),
-            HERMES_HOME=str(self.home),
-        )
-        environment["PATH"] = str(binaries) + os.pathsep + environment.get("PATH", "")
-        for command in ([str(python), "-c", "pass"], [str(hermes), "--version"]):
+        if not (runtime / "pm/environments.py").is_file() and not all(
+                path.is_file() and os.access(path, os.X_OK) for path in (binaries / "python", binaries / "hermes")):
+            return False
+        commands = [command]
+        if (runtime / "pm/runtime.py").is_file():
             try:
-                subprocess.run(command, cwd=self.home, env=environment, check=True,
+                stamp = read_json(runtime / "install-stamp.json", {})
+            except (OSError, ValueError):
+                return False
+            packaged = stamp.get("pmRuntime")
+            if not isinstance(packaged, str) or not Path(packaged).is_absolute():
+                return False
+            commands.append([command[0], "-c", PM_CHECK])
+            if self.discord_enabled():
+                commands.append([command[0], "-c", DISCORD_CHECK])
+        for command in commands:
+            try:
+                python = command[0] if (runtime / "pm/environments.py").is_file() else None
+                subprocess.run(command, cwd=runtime, env=self.runtime_environment(runtime, python=python), check=True,
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=5)
             except (OSError, subprocess.SubprocessError):
@@ -150,7 +264,7 @@ class RuntimeManager:
     def progress(self, state, step):
         atomic_json(self.progress_path, {"state": state, "step": step, "updated_at": time.time()})
 
-    def _run(self, command, cwd=None, timeout=180):
+    def _run(self, command, cwd=None, timeout=180, runtime=None):
         build_home = self.root / "build-home"
         build_home.mkdir(parents=True, exist_ok=True)
         environment = {name: value for name, value in self.env.items()
@@ -158,6 +272,9 @@ class RuntimeManager:
                                    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}}
         environment.update(HOME=str(build_home), HERMES_HOME=str(build_home), GIT_TERMINAL_PROMPT="0",
                            UV_NO_PROGRESS="1", UV_PYTHON_DOWNLOADS="never")
+        if runtime is not None:
+            python = command[0] if Path(command[0]).name.startswith("python") else None
+            environment = self.runtime_environment(runtime, environment, python=python)
         log_path = self.root / "preparation.log"
         descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(descriptor, "a") as log:
@@ -178,7 +295,7 @@ class RuntimeManager:
             self.progress("running", "Installing the release's locked Python dependencies")
             if not (target / "uv.lock").is_file():
                 raise ValueError("This release has no dependency lock; it cannot be installed safely")
-            image_python = self.env.get("HERMES_IMAGE_PYTHON", "/opt/hermes/.venv/bin/python")
+            image_python = self.env.get("HERMES_IMAGE_PYTHON", str(self.runtime_path("image") / ".venv/bin/python"))
             # Upstream's "all" extra excludes opt-in messaging SDKs.
             self._run(["uv", "sync", "--frozen", "--no-dev", "--extra", "all",
                        "--extra", "discord", "--python", image_python], cwd=target, timeout=1800)
@@ -192,25 +309,19 @@ class RuntimeManager:
                            "--commit", commit, "--base-version", tag.removeprefix("v"),
                            "--distance", "0", "--distribution", "docker",
                            "--update-mechanism", "external"], cwd=target)
-                pm_project = target / "pm"
-                if (pm_project / "pyproject.toml").is_file():
-                    if not (pm_project / "uv.lock").is_file():
-                        raise ValueError("This release has no PM dependency lock")
-                    self.progress("running", "Preparing the release's independent package manager")
-                    self._run(["uv", "sync", "--frozen", "--no-dev", "--project", str(pm_project),
-                               "--python", image_python], cwd=target, timeout=1800)
-                    self._run([str(pm_project / ".venv/bin/python"), "-c", PM_METADATA,
-                               str(target / "install-stamp.json")], cwd=target)
-                    self._run([str(target / ".venv/bin/python"), "-c",
-                               "from pm.runtime import runtime_command, runtime_environment; "
-                               "import subprocess; "
-                               "from pm.paths import repo_root; "
-                               "command = runtime_command(repo_root() / 'pm/launch.py', ['--help'], bootstrap=False); "
-                               "subprocess.run(command, env=runtime_environment(), check=True)"], cwd=target)
+            if (target / "pm/runtime.py").is_file():
+                self.progress("running", "Validating the packaged PM runtime before dependency installation")
+                self.prepare_pm_runtime(target, image_python)
+                if self.discord_enabled():
+                    self.progress("running", "Installing Discord in the gateway's managed dependency environment")
+                    self._run([str(target / ".venv/bin/python"), "-c", PM_INSTALL_DISCORD],
+                              cwd=target, runtime=target, timeout=1800)
             self.progress("running", "Checking the staged Hermes runtime")
-            self._run([str(target / ".venv/bin/python"), "-c", "import hermes_cli.main; import gateway.run"], cwd=target)
-            self._run([str(target / ".venv/bin/python"), "-c", DISCORD_CHECK], cwd=target)
-            self._run([str(target / ".venv/bin/hermes"), "--version"], cwd=target)
+            launch = self.runtime_command(target, ["--version"])
+            python = launch[0] if (target / "pm/environments.py").is_file() else str(target / ".venv/bin/python")
+            self._run([python, "-c", "import hermes_cli.main; import gateway.run"], cwd=target, runtime=target)
+            self._run([python, "-c", DISCORD_CHECK], cwd=target, runtime=target)
+            self._run(launch, cwd=target, runtime=target)
             atomic_json(target / "workbench-release.json", {"tag": tag, "commit": commit, "installed_at": time.time()})
             return release_name
         except BaseException:
@@ -232,6 +343,8 @@ class RuntimeManager:
         gateway = read_json(self.home / "gateway_state.json", {})
         if (gateway.get("gateway_state") != "running" or not services["gateway"].get("pid")
                 or gateway.get("pid") != services["gateway"]["pid"]):
+            return False
+        if not self.discord_ready(gateway):
             return False
         try:
             port = int(self.env.get("API_SERVER_PORT", "8642"))
@@ -261,7 +374,8 @@ class RuntimeManager:
             if consecutive >= 3:
                 return
             threading.Event().wait(1)
-        raise ValueError("Hermes services did not become healthy")
+        detail = " (including enabled Discord)" if self.discord_enabled() else ""
+        raise ValueError(f"Hermes services did not become healthy{detail}")
 
     def _pause_for_recovery(self):
         atomic_json(self.root / "paused.json", {"reason": "activation recovery"})
@@ -275,6 +389,8 @@ class RuntimeManager:
 
     def activate(self, current, before_restart=None):
         old = self.selection()
+        if current != old["current"] and not self.runtime_available(current):
+            raise ValueError("The requested Hermes runtime is incomplete; activation was not attempted")
         config_backup = {name: (self.home / name).read_bytes() if (self.home / name).exists() else None
                          for name in ("config.yaml", ".env")}
         if before_restart:
@@ -285,7 +401,7 @@ class RuntimeManager:
         self.progress("running", "Restarting Hermes and checking both services")
         try:
             self._wait_healthy(selection["generation"])
-        except Exception:
+        except Exception as failure:
             self._pause_for_recovery()
             for name, content in config_backup.items():
                 path = self.home / name
@@ -304,7 +420,7 @@ class RuntimeManager:
             except Exception:
                 raise ValueError("Hermes activation failed and recovery needs operator attention") from None
             (self.root / "activation.json").unlink(missing_ok=True)
-            raise ValueError("Hermes activation failed; the previous runtime was restored") from None
+            raise ValueError(f"Hermes activation failed: {failure}; the previous runtime was restored") from None
         (self.root / "activation.json").unlink(missing_ok=True)
 
     def recover_interrupted_activation(self):
@@ -333,6 +449,8 @@ class RuntimeManager:
 
         previous = selected.get("previous")
         fallback = previous if self.runtime_available(previous) else "image"
+        if not self.runtime_available(fallback):
+            raise ValueError("No valid Hermes runtime is available; operator attention is required")
         fallback_previous = "image" if fallback != "image" else None
         self._select(fallback, fallback_previous)
         (self.root / "paused.json").unlink(missing_ok=True)
@@ -396,7 +514,8 @@ class RuntimeManager:
             if (replacement.get("restart_id") == request_id
                     and replacement.get("state") == "running"
                     and gateway.get("gateway_state") == "running"
-                    and gateway.get("pid") == replacement.get("pid")):
+                    and gateway.get("pid") == replacement.get("pid")
+                    and self.discord_ready(gateway)):
                 print("Gateway restarted through the Workbench supervisor")
                 return
             threading.Event().wait(1)
@@ -416,12 +535,11 @@ def supervise(role):
         selected = manager.selection()
         restart_id = read_json(manager.root / "gateway-restart.json", {}).get("id")
         runtime = manager.runtime_path(selected["current"])
-        environment = dict(os.environ, HERMES_AGENT_DIR=str(runtime), HERMES_PYTHON=str(runtime / ".venv/bin/python"),
-                   HERMES_INSTALL_DIR=str(runtime), HERMES_INSTALL_ROOT=str(runtime), VIRTUAL_ENV=str(runtime / ".venv"),
-                   HERMES_GATEWAY_NO_SUPERVISE="1")
-        environment["PATH"] = str(runtime / ".venv/bin") + os.pathsep + environment.get("PATH", "")
-        command = [str(runtime / ".venv/bin/hermes")]
-        command += ["gateway", "run"] if role == "gateway" else ["serve", "--host", "127.0.0.1", "--port", "9119", "--no-open"]
+        arguments = ["gateway", "run"] if role == "gateway" else ["serve", "--host", "127.0.0.1", "--port", "9119", "--no-open"]
+        command = manager.runtime_command(runtime, arguments)
+        python = command[0] if (runtime / "pm/environments.py").is_file() else None
+        environment = manager.runtime_environment(runtime, python=python)
+        environment["HERMES_GATEWAY_NO_SUPERVISE"] = "1"
         child = subprocess.Popen(command, cwd=manager.home, env=environment, start_new_session=True)
         try:
             while child.poll() is None and not stopping.is_set():
@@ -453,11 +571,10 @@ def exec_cli(arguments):
         manager.restart_gateway(detach="--detach" in arguments)
         return
     runtime = manager.runtime_path()
-    environment = dict(os.environ, HERMES_AGENT_DIR=str(runtime), HERMES_PYTHON=str(runtime / ".venv/bin/python"),
-                       HERMES_INSTALL_DIR=str(runtime), HERMES_INSTALL_ROOT=str(runtime), VIRTUAL_ENV=str(runtime / ".venv"))
-    environment["PATH"] = str(runtime / ".venv/bin") + os.pathsep + environment.get("PATH", "")
-    binary = str(runtime / ".venv/bin/hermes")
-    os.execve(binary, [binary, *arguments], environment)
+    command = manager.runtime_command(runtime, arguments)
+    python = command[0] if (runtime / "pm/environments.py").is_file() else None
+    environment = manager.runtime_environment(runtime, python=python)
+    os.execve(command[0], command, environment)
 
 
 if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "exec":
