@@ -1,5 +1,7 @@
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ActiveCanvasContext } from "../agent/activeCanvasContext";
+import { CANVAS_PROJECT_FILE_LINKED_EVENT } from "../agent/chatSessions";
 import { updateAgentProvider, useAgentProvider } from "../agent/agentStore";
 import { compatClient, type AppPreviewSession, type CapabilityState, type GitHostConnection, type GitProvider, type WorkspaceEntry, type WorkspaceGitPreview } from "../api/compatClient";
 import { formatWorkspaceJson, workspaceFileKind, WORKSPACE_PREVIEW_MAX_BYTES } from "../agent/workspacePreview";
@@ -8,6 +10,7 @@ import { prepareAttachment } from "../agent/attachments";
 import { CollabHint } from "./CollabHint";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
+import { ImageEditor } from "./ImageEditor";
 
 type WorkspaceStatus = CapabilityState | "idle";
 type AppPreviewRef = Pick<AppPreviewSession, "session_id" | "path" | "port" | "view_url">;
@@ -66,10 +69,14 @@ function statusToCapability(status: WorkspaceStatus): CapabilityState {
   return status;
 }
 
-export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl }: {
+export function ProjectWorkspace({ focusPath, focusRequest, openFileRequest, browseRequest, chatId, onOpenSourceControl, onContextChange }: {
   focusPath?: string;
   focusRequest?: number;
+  openFileRequest?: { path: string; request: number } | null;
+  browseRequest: number;
+  chatId: string | null;
   onOpenSourceControl: (path: string) => void;
+  onContextChange?: (context: ActiveCanvasContext) => void;
 }) {
   const agentProvider = useAgentProvider();
   const [currentPath, setCurrentPath] = useState("");
@@ -77,6 +84,7 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
   const [treeEntries, setTreeEntries] = useState<Record<string, WorkspaceEntry[]>>({});
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set([""]));
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
+  const [showBrowser, setShowBrowser] = useState(true);
   const [editorContent, setEditorContent] = useState("");
   const [conflictState, setConflictState] = useState<ConflictState>("current");
   const [dirty, setDirty] = useState(false);
@@ -84,6 +92,8 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
   const [message, setMessage] = useState("Browse any directory on this host and open a text/code file.");
   /** When set, the editor shows a side-by-side diff of this baseline vs the current buffer. */
   const [diffBaseline, setDiffBaseline] = useState<{ content: string; label: string } | null>(null);
+  const [fileHistory, setFileHistory] = useState<{ id: string; created_at: number }[] | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [creatingFile, setCreatingFile] = useState(false);
@@ -116,6 +126,7 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
   const [mediaUrl, setMediaUrl] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [imageFit, setImageFit] = useState(true);
+  const [imageEditing, setImageEditing] = useState(false);
   const [previewBackground, setPreviewBackground] = useState<"light" | "dark" | "checker">("light");
   const [previewSetupOpen, setPreviewSetupOpen] = useState(false);
   const [previewPath, setPreviewPath] = useState("");
@@ -158,10 +169,23 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
   const openSequence = useRef(0);
   const treeRevision = useRef(0);
   const previewLogOffset = useRef(0);
+  const latestEditor = useRef({ openFile, dirty, historyBusy });
+  latestEditor.current = { openFile, dirty, historyBusy };
 
   const editorLanguage = useMemo(() => languageForPath(openFile?.path || ""), [openFile?.path]);
   const fileKind = openFile ? workspaceFileKind(openFile.path) : "text";
   const editable = ["text", "json", "html", "markdown"].includes(fileKind);
+  useEffect(() => {
+    onContextChange?.(openFile
+      ? { space: "Projects", detail: openFile.path, dirty, imageFile: fileKind === "image", content: editable ? editorContent : undefined }
+      : { space: "Projects", detail: "No file open" });
+  }, [onContextChange, openFile, editorContent, dirty, editable, fileKind]);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
   const hasTextPreview = ["json", "html", "markdown"].includes(fileKind);
   const displayedContent = useMemo(() => fileKind === "json" && viewMode === "view"
     ? formatWorkspaceJson(editorContent) : editorContent, [fileKind, viewMode, editorContent]);
@@ -612,8 +636,9 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
     });
   }
 
-  async function openWorkspaceFile(path: string) {
-    if (dirty && !window.confirm("Discard your unsaved changes and open another file?")) return;
+  async function openWorkspaceFile(path: string, discardChanges = false): Promise<boolean> {
+    if (historyBusy) return false;
+    if (dirty && !discardChanges && !window.confirm("Discard your unsaved changes and open another file?")) return false;
     const sequence = ++openSequence.current;
     setStatus("degraded");
     setMessage(`Opening ${path}`);
@@ -622,27 +647,43 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
       const result = ["text", "json", "html", "markdown"].includes(kind)
         ? await compatClient.readWorkspaceFile(path)
         : { ...await compatClient.getWorkspaceFileStatus(path), content: "" };
-      if (sequence !== openSequence.current) return;
+      if (sequence !== openSequence.current) return false;
       setOpenFile({
         path: result.path,
         content: result.content || "",
         modifiedTs: result.modified_ts,
         sizeBytes: result.size_bytes,
       });
+      setShowBrowser(false);
       setEditorContent(result.content || "");
       setDirty(false);
+      setImageEditing(false);
       setConflictState("current");
       setDiffBaseline(null);
+      setFileHistory(null);
       setViewMode("view");
       setImageFit(true);
       setMediaUrl("");
       setPreviewError("");
       setStatus("available");
       setMessage(`Opened ${result.path} (${formatBytes(result.size_bytes)})`);
+      if (chatId) {
+        try {
+          await compatClient.updateCanvasProjectFile(chatId, result.path, "link");
+          window.dispatchEvent(new CustomEvent(CANVAS_PROJECT_FILE_LINKED_EVENT, { detail: { chatId } }));
+        } catch (error) {
+          if (sequence === openSequence.current) {
+            setStatus("error");
+            setMessage(`File opened, but could not link it to this chat: ${error}`);
+          }
+        }
+      }
+      return true;
     } catch (error) {
-      if (sequence !== openSequence.current) return;
+      if (sequence !== openSequence.current) return false;
       setStatus("error");
       setMessage(`Open failed: ${error}`);
+      return false;
     }
   }
 
@@ -702,10 +743,11 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
   }
 
   async function deleteWorkspaceFile(path: string, isDirectory = false) {
+    if (historyBusy) return;
     if (isDirectory) {
       const name = path.split("/").filter(Boolean).pop() || path;
       if (window.prompt(`Delete folder ${path} and ALL its contents?\n\nThe complete folder will be moved to a recovery backup. Unsaved edits inside it will be discarded.\n\nType ${name} to confirm:`) !== name) return;
-    } else if (!window.confirm(`Delete ${path}?\n\nThe companion API keeps a timestamped backup.`)) return;
+    } else if (!window.confirm(`Delete ${path}?\n\nThe companion API keeps a timestamped backup.${dirty && openFile?.path === path ? "\nUnsaved editor changes will be discarded." : ""}`)) return;
 
     ++treeRevision.current;
     setStatus("degraded");
@@ -739,9 +781,16 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
 
   /** Compare what's now on disk (e.g. an agent edit) against the version in the editor. */
   async function showDiskDiff() {
-    if (!openFile) return;
+    if (!openFile || historyBusy) return;
+    const sequence = ++openSequence.current;
     try {
       const latest = await compatClient.readWorkspaceFile(openFile.path);
+      if (sequence !== openSequence.current) return;
+      if (dirty) {
+        setDiffBaseline({ content: latest.content || "", label: "current disk version" });
+        setMessage(`Comparing ${latest.path} on disk with your unsaved editor contents.`);
+        return;
+      }
       setEditorContent(latest.content || "");
       setOpenFile({
         path: latest.path,
@@ -759,13 +808,57 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
     }
   }
 
+  async function toggleFileHistory() {
+    if (!openFile || !editable || historyBusy) return;
+    if (fileHistory !== null) {
+      setFileHistory(null);
+      return;
+    }
+    setHistoryBusy(true);
+    try {
+      const history = await compatClient.getWorkspaceFileHistory(openFile.path);
+      setFileHistory(history.versions);
+    } catch (error) {
+      setStatus("error");
+      setMessage(`File history unavailable: ${error}`);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
+  async function restoreFileVersion(versionId: string) {
+    if (!openFile || historyBusy) return;
+    if (dirty && !window.confirm("Discard your unsaved changes and restore this version?")) return;
+    ++openSequence.current;
+    setHistoryBusy(true);
+    try {
+      await compatClient.restoreWorkspaceFile(openFile.path, versionId, openFile.modifiedTs, openFile.sizeBytes);
+      const restored = await compatClient.readWorkspaceFile(openFile.path);
+      setOpenFile({ path: restored.path, content: restored.content, modifiedTs: restored.modified_ts, sizeBytes: restored.size_bytes });
+      setEditorContent(restored.content);
+      setDirty(false);
+      setConflictState("current");
+      setDiffBaseline(null);
+      setFileHistory(null);
+      setStatus("available");
+      setMessage(`Restored ${restored.path}. The previous version was saved.`);
+    } catch (error) {
+      setStatus("error");
+      setMessage(`Restore failed: ${error}`);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
   async function saveWorkspaceFile() {
+    if (historyBusy) return;
     if (!openFile || !editable) {
       setStatus("error");
       setMessage("Open a workspace file before saving.");
       return;
     }
-
+    ++openSequence.current;
+    setHistoryBusy(true);
     setStatus("degraded");
     setMessage(`Checking ${openFile.path} before save`);
     try {
@@ -804,6 +897,8 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
     } catch (error) {
       setStatus("error");
       setMessage(`Save failed: ${error}`);
+    } finally {
+      setHistoryBusy(false);
     }
   }
 
@@ -812,7 +907,21 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
   }, []);
 
   useEffect(() => {
+    if (!openFileRequest) return;
+    if (openFileRequest.path === openFile?.path) {
+      setShowBrowser(false);
+    } else {
+      void openWorkspaceFile(openFileRequest.path);
+    }
+  }, [openFileRequest]);
+
+  useEffect(() => {
+    if (browseRequest) setShowBrowser(true);
+  }, [browseRequest]);
+
+  useEffect(() => {
     if (!focusPath) return;
+    setShowBrowser(true);
     let cancelled = false;
     let frame = 0;
     const revision = treeRevision.current;
@@ -905,6 +1014,16 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
         const result = await compatClient.getWorkspaceFileStatus(openFile.path);
         if (cancelled) return;
         const changed = result.modified_ts !== openFile.modifiedTs || result.size_bytes !== openFile.sizeBytes;
+        if (changed && editable && !latestEditor.current.dirty && !latestEditor.current.historyBusy) {
+          const updated = await compatClient.readWorkspaceFile(openFile.path);
+          const current = latestEditor.current;
+          if (cancelled || current.dirty || current.historyBusy || current.openFile !== openFile) return;
+          setOpenFile({ path: updated.path, content: updated.content, modifiedTs: updated.modified_ts, sizeBytes: updated.size_bytes });
+          setEditorContent(updated.content);
+          setDiffBaseline({ content: openFile.content, label: "version you opened" });
+          setConflictState("current");
+          return;
+        }
         setConflictState(changed ? "changed" : "current");
       } catch (error) {
         if (cancelled) return;
@@ -921,16 +1040,16 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [openFile]);
+  }, [openFile, editable]);
 
   return (
     <section className="project-workspace" aria-label="Project workspace">
       <div className="workspace-section-header">
         <div>
-          <h2>Project Workspace</h2>
-          <p className="muted">System-wide file explorer — open any directory on this host, edit with Monaco.</p>
+          <h2>Projects</h2>
         </div>
         <div className="project-header-actions">
+          <button className="btn secondary small" type="button" onClick={() => setShowBrowser((visible) => !visible)}>{showBrowser ? "Focus file" : "Browse files"}</button>
           {terminalAuthRequired && <button className="btn secondary small" type="button" onClick={() => {
             setTerminalTokenDraft("");
             setTokenSetupOpen((open) => !open);
@@ -964,8 +1083,8 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
         </form>
       </dialog>
 
-      <div className="project-workspace-grid">
-        <aside className="project-browser" aria-label="Project file browser">
+      <div className={`project-workspace-grid${showBrowser ? "" : " editor-focused"}`}>
+        <aside className="project-browser" aria-label="Project file browser" hidden={!showBrowser}>
           <div className="project-browser-toolbar">
             <button className="btn secondary small" type="button" onClick={() => { setCreatingFolder(!creatingFolder); setCreatingFile(false); setNewFolderName(""); }} disabled={creatingFileBusy}>
               <Icon name="folder" size={14} /> New folder
@@ -1085,19 +1204,22 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
                 <button className={viewMode === "view" ? "active" : ""} type="button" onClick={() => { setDiffBaseline(null); setViewMode("view"); }}>View</button>
                 <button className={viewMode === "edit" ? "active" : ""} type="button" onClick={() => setViewMode("edit")}>Edit</button>
               </div>}
-              {fileKind === "json" && viewMode === "edit" && <button className="btn secondary" type="button" onClick={() => {
+              {fileKind === "json" && viewMode === "edit" && <button className="btn secondary" type="button" disabled={historyBusy} onClick={() => {
                 const formatted = formatWorkspaceJson(editorContent);
                 setEditorContent(formatted);
                 setDirty(formatted !== openFile?.content);
               }}>Format JSON</button>}
-              {fileKind === "image" && <div className="wiki-view-toggle" role="group" aria-label="Image size">
+              {fileKind === "image" && !imageEditing && <div className="wiki-view-toggle" role="group" aria-label="Image size">
                 <button className={imageFit ? "active" : ""} type="button" onClick={() => setImageFit(true)}>Fit</button>
                 <button className={!imageFit ? "active" : ""} type="button" onClick={() => setImageFit(false)}>Actual size</button>
               </div>}
-              {(fileKind === "html" || fileKind === "image") && <div className="job-preview-backgrounds" role="group" aria-label="Preview background">
+              {fileKind === "image" && !imageEditing && <button className="btn secondary" type="button" disabled={!mediaUrl || Boolean(previewError)} onClick={() => setImageEditing(true)}>Edit image</button>}
+              {(fileKind === "html" || (fileKind === "image" && !imageEditing)) && <div className="job-preview-backgrounds" role="group" aria-label="Preview background">
                 {(["light", "dark", "checker"] as const).map((background) => <button key={background} type="button" className={`job-preview-swatch ${background} ${previewBackground === background ? "selected" : ""}`} aria-label={`${background} preview background`} aria-pressed={previewBackground === background} title={`${background} background`} onClick={() => setPreviewBackground(background)} />)}
               </div>}
               {openFile ? <span className={`file-watch-pill ${conflictState}`}>{conflictState}</span> : null}
+              {!imageEditing && <>
+              <button className="btn secondary" type="button" onClick={() => void toggleFileHistory()} disabled={!openFile || !editable || historyBusy} aria-pressed={fileHistory !== null}>History</button>
               {diffBaseline ? (
                 <button className="btn secondary" type="button" onClick={() => setDiffBaseline(null)}>
                   Exit diff
@@ -1143,10 +1265,14 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
               >
                 Delete
               </button>
-              <button className="btn secondary" type="button" onClick={saveWorkspaceFile} disabled={!openFile || !editable || !dirty}>
+              <button className="btn secondary" type="button" onClick={saveWorkspaceFile} disabled={!openFile || !editable || !dirty || historyBusy}>
                 Save
               </button>
+              </>}
             </div>
+            {fileHistory !== null && <div className="document-history" aria-label="File version history">
+              {fileHistory.length ? fileHistory.map((version) => <button key={version.id} type="button" disabled={historyBusy} onClick={() => void restoreFileVersion(version.id)}>Restore version · {new Date(version.created_at).toLocaleString()}</button>) : <span>No saved versions yet.</span>}
+            </div>}
           </div>
           {previewSetupOpen && !previewSession && <form className="app-preview-setup" onSubmit={(event) => void startAppPreview(event)}>
             <div className="app-preview-heading">
@@ -1211,6 +1337,17 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
                 <pre>{previewLogs || "Waiting for output..."}</pre>
               </details>
             </div>
+          ) : openFile && fileKind === "image" && imageEditing && mediaUrl ? (
+            <ImageEditor key={`${openFile.path}-${openFile.modifiedTs}`} source={mediaUrl} name={openFile.path.split("/").pop() || "image"} onDirtyChange={setDirty}
+              onCancel={() => {
+                if (dirty && !window.confirm("Discard your unsaved image edits?")) return;
+                setDirty(false);
+                setImageEditing(false);
+              }}
+              onSaveCopy={async (file) => {
+                const imported = await prepareAttachment(file, (filename, base64) => compatClient.importWorkspaceFile(filename, base64, parentPath(openFile.path)));
+                if (!await openWorkspaceFile(imported.path, true)) throw new Error(`Saved ${imported.path}, but could not open it. Your edits remain available.`);
+              }} />
           ) : openFile && !editable ? (
             <div className={`workspace-file-preview ${imageFit ? "fit" : "actual"} ${previewBackground}`}>
               {fileKind === "binary" ? <p className="muted">No built-in preview for this file type. Download it to open in another application.</p>
@@ -1266,7 +1403,7 @@ export function ProjectWorkspace({ focusPath, focusRequest, onOpenSourceControl 
             options={{
               fontSize: 13,
               minimap: { enabled: false },
-              readOnly: !openFile || (fileKind === "json" && viewMode === "view"),
+              readOnly: historyBusy || !openFile || (fileKind === "json" && viewMode === "view"),
               scrollBeyondLastLine: false,
               wordWrap: "on",
             }}

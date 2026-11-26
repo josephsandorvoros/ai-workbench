@@ -4,6 +4,8 @@ Open **Projects**. The file tree stays rooted in the workspace; expand folders, 
 
 HTML and Markdown open in a rendered **View**; use **Edit** for their source. JSON has a formatted read-only view and an explicit **Format JSON** action in Edit mode. Images have Fit/Actual size controls. PDFs, audio, and video use browser-supported previews; unsupported or oversized files remain downloadable.
 
+For an image, **Edit image** provides a pen and a crop rectangle in pixels. **Save PNG copy** writes a new file alongside the original; it never overwrites it. Editing is limited to 16 megapixels and the PNG copy to 10 MB. Animation and layers are flattened. Ask Hermes in chat to generate or edit images using its configured image tools or ComfyUI skill; support depends on that provider and its access to the workspace, and results may need to be opened manually.
+
 ## Run a project app
 
 In **Projects**, choose **Run app** to start a project from a workspace-relative folder. Enter the start command and the port the app listens on. The default serves static files with `python3 -m http.server "$PORT" --bind 127.0.0.1` on port `8000`; the process receives `PORT` and `PREVIEW_BASE`. Keep the server bound to `127.0.0.1`. The Workbench checks the port, shows process output and readiness, and proxies the app into the editor preview. Use **Stop app** to terminate the process group. Save editor changes before launching; the server uses files on disk.

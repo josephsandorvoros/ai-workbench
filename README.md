@@ -2,17 +2,51 @@
 
 *Your models. Your rules.*
 
-A browser-based AI workbench: agent chat (Hermes / OpenCode / any OpenAI-compatible model), project files with Monaco and managed live app previews, a markdown wiki with `[[wikilinks]]`, an Excalidraw spatial board, HTML artifacts, a job board where Hermes plans work and isolated OpenCode workers execute it, and host resource monitoring.
+A browser-based AI workbench: agent chat (Hermes / OpenCode / any OpenAI-compatible model), project files with Monaco and managed live app previews, a markdown wiki with `[[wikilinks]]`, an Excalidraw spatial board, HTML artifacts, diagrams, spreadsheets and slide decks, a job board where Hermes plans work and isolated OpenCode workers execute it, and host resource monitoring.
 
-Chat is the central workspace. On desktop, select tools from the left navigation to open a floating, tabbed **Canvas** on the right, including the dedicated **Source Control** workspace. Keep several tools open, resize or expand the canvas, and close/reopen it without losing the conversation or tool state. Phones use a **chat-only** layout without the canvas, tool rail, or monitoring. Normal desktop page loads start with chat only; `?tab=...` links still open a specific tool on desktop.
+Chat is the central workspace. On desktop, open **Documents** or **Projects** from the left navigation to work in a focused **Canvas** beside chat. Use **New** in the Canvas header to create an item, and **Related work** to open items or files linked to the conversation. Under **Project**, use the file dropdown to navigate folders and open a workspace file, or filter Canvas items by folder. Other tools, including **Source Control**, remain available separately from the tool rail. Resize or expand the panel, and close or reopen Canvas without losing the conversation or editor state. Phones use a **chat-only** layout without the canvas, tool rail, or monitoring. Normal desktop page loads start with chat only; `?tab=...` links still open a specific workspace on desktop.
+
+**Documents** is the first content workspace in Canvas. Create a Markdown document as a chat draft or link it to an existing workspace project folder, edit and preview it, then use **Save** and **Download**. Find it again under its chat or filter Canvas items by project folder in **Related work**. Documents are stored in the managed server library (`$HERMES_HOME/spatial-workbench/documents.json`), not as project files; include that library in backups. A stale save is rejected rather than overwriting another edit.
+
+Chat includes the visible Canvas context with each message, including up to 12,000 characters of an open Canvas item, project file, or wiki note; this is sent to the selected model provider. A tool-enabled direct API assistant can read and edit Canvas items, and the bundled Workbench MCP server provides the same tools to a configured Hermes Gateway after the updated server is deployed and reloaded. Other providers may not have those tools. AI edits retain a restorable previous version under **History**; unsaved editor changes are preserved if an item changes elsewhere. Other workspaces currently provide their name, not detailed selection context.
+
+Project files opened in Canvas are linked to the active chat by path and appear alongside its documents; removing a link does not delete the file. The project file remains the source of truth. Use **Browse files** to choose another file and **History** to restore snapshots made by Workbench file writes, including its AI file tools. Earlier backups and changes made directly by external tools are not listed in this history. A changed file refreshes in a clean editor; a dirty editor retains its buffer and offers a comparison. Workbench AI writes check the file version rather than forcing an overwrite. Gateway tools need the updated MCP server, and other agent tools may write outside the Workbench's recovery mechanism.
+
+In **Projects**, import or open an image and choose **Edit image** to draw on it or crop it using pixel coordinates. **Save PNG copy** writes a new file beside the original without overwriting it. The editor supports images up to 16 megapixels; PNG copies flatten animation and layers and must fit the 10 MB upload limit. To generate or edit an image with AI, ask Hermes in chat; it must have an appropriate image tool or ComfyUI skill configured and access to the workspace. Its output may need to be opened manually in Projects. Provider availability and Gateway image generation have not been verified by the Workbench.
+
+Create an interactive visualization with **New → Interactive HTML**, or ask a tool-enabled direct API assistant to create one. Choose a chat draft or project for the first item; later items can reuse that location, or use **Choose type and location** to pick another. HTML items live in the managed document library, not the project filesystem. The preview opens by default; switch between **Source**, **Split**, and **Preview** without discarding changes. Save, download, AI editing, and version history work as with documents. Direct API creations open automatically unless another editor has unsaved changes, in which case chat offers **Open in Canvas**.
+
+HTML runs scripts and forms in a sandboxed frame without same-origin access to the Workbench, but it can make network requests. Only preview HTML you trust with network access. Gateway creation requires the updated Workbench MCP server to be deployed and connected to the same backend; Gateway creation and automatic opening have not been verified. A Gateway-created item may require **Refresh library** and manual opening.
+
+Use **New → Visual diagram** for a draggable Excalidraw drawing, or **New → Mermaid diagram** for editable Mermaid source and a rendered preview. Both are separate, chat-linked Canvas items in the managed document library; they do not modify the shared Spatial Board. Save changes explicitly, reopen items from **Related work**, and download visual diagrams as `.excalidraw` or Mermaid source as `.mmd`. The formats are separate and do not automatically convert between each other. A tool-enabled direct API assistant can create and edit them using Canvas tools; Gateway support needs the updated Workbench MCP server and has not been verified.
+
+Use **New → Spreadsheet** or **New → Slide deck** to create editable Canvas items, or import an `.xlsx` workbook or `.pptx` presentation. Click text on a slide to edit it; use its handles to move or resize the text box, or focus a handle and use arrow keys (Shift for larger steps). Export creates `.xlsx` and `.pptx` files. Spreadsheet formulas are retained with cached results but are not calculated in Canvas; exported workbooks request recalculation when opened in Excel. Imports are limited to 10 MB compressed and 20 MB expanded. XLSX import preserves basic values and formulas, not formatting, charts, macros, or other advanced workbook features. PPTX import preserves editable text and approximate positions; images, charts, themes/layout fidelity, transitions, and animations are not preserved.
 
 Browser tabs and bookmarks use the violet chat-and-canvas icon. On iPhone, use Safari's **Share → Add to Home Screen** for the matching home-screen icon. Icon assets ship in `spatial-workbench/public/` and are copied into production builds.
 
 ## Screenshots
 
-![AI Workbench overview](screenshots/workbench-overview.png)
+![New chat with Canvas closed](screenshots/workbench-overview.png)
 
-Full-screen captures of the live workspaces: [Projects](screenshots/projects-workspace.png), [Jobs Board](screenshots/jobs-board.png), [Spatial Board](screenshots/spatial-board.png), [Wiki](screenshots/wiki-workbench.png), [Agent Workbench](screenshots/agent-workbench.png), [Chat Sessions](screenshots/chat-sessions.png), [Free AI model tracker](screenshots/free-ai-model-tracker.png), and [Help](screenshots/help-window.png).
+These screenshots use demo content, simulated conversation and metrics. Jobs and model listings are fictional.
+
+### Canvas
+
+| Document | Interactive HTML | Diagram |
+|---|---|---|
+| [![Document in Canvas](screenshots/canvas-document.png)](screenshots/canvas-document.png) | [![Interactive HTML in Canvas](screenshots/canvas-interactive-html.png)](screenshots/canvas-interactive-html.png) | [![Diagram in Canvas](screenshots/canvas-diagram.png)](screenshots/canvas-diagram.png) |
+| **Spreadsheet** | **Slide deck** | **Image editor** |
+| [![Spreadsheet in Canvas](screenshots/canvas-spreadsheet.png)](screenshots/canvas-spreadsheet.png) | [![Slide deck in Canvas](screenshots/canvas-slides.png)](screenshots/canvas-slides.png) | [![Image editor](screenshots/canvas-image-editor.png)](screenshots/canvas-image-editor.png) |
+
+### More Workbench views
+
+| Projects | Jobs Board | Spatial Board |
+|---|---|---|
+| [![Projects](screenshots/projects-workspace.png)](screenshots/projects-workspace.png) | [![Jobs Board](screenshots/jobs-board.png)](screenshots/jobs-board.png) | [![Spatial Board](screenshots/spatial-board.png)](screenshots/spatial-board.png) |
+| **Wiki** | **Agent Workbench** | **Chat Sessions** |
+| [![Wiki](screenshots/wiki-workbench.png)](screenshots/wiki-workbench.png) | [![Agent Workbench](screenshots/agent-workbench.png)](screenshots/agent-workbench.png) | [![Chat Sessions](screenshots/chat-sessions.png)](screenshots/chat-sessions.png) |
+| **Free AI model tracker** | **Help** | |
+| [![Free AI model tracker](screenshots/free-ai-model-tracker.png)](screenshots/free-ai-model-tracker.png) | [![Help](screenshots/help-window.png)](screenshots/help-window.png) | |
 
 ## Layout
 

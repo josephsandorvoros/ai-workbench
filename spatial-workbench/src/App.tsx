@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { detectRuntimeMode, getCapabilityView } from "./api/capabilityRegistry";
-import { compatClient, type AppConfig, type CapabilityState, type NodeStats, type StatsSourceResponse } from "./api/compatClient";
+import { compatClient, type AppConfig, type CanvasDocument, type CapabilityState, type NodeStats, type StatsSourceResponse } from "./api/compatClient";
 import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import { SourceControlWorkbench } from "./components/SourceControlWorkbench";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -8,6 +8,9 @@ import { WikiWorkbench } from "./components/WikiWorkbench";
 import { AgentWorkbench } from "./components/AgentWorkbench";
 import { SessionsWorkbench } from "./components/SessionsWorkbench";
 import { AgentChat } from "./components/AgentChat";
+import { DocumentCanvas } from "./components/DocumentCanvas";
+import type { ActiveCanvasContext } from "./agent/activeCanvasContext";
+import { CANVAS_ITEM_CREATED_EVENT } from "./agent/chatSessions";
 import { useMobileChat } from "./lib/useMobileChat";
 import { GuardrailsWorkbench } from "./components/GuardrailsWorkbench";
 import { JobsBoard } from "./components/JobsBoard";
@@ -97,7 +100,7 @@ interface MetricPillProps {
   detail?: string;
 }
 
-type WorkspaceTab = "sessions" | "project" | "source-control" | "jobs" | "board" | "wiki" | "agent" | "terminal" | "guardrails";
+type WorkspaceTab = "documents" | "sessions" | "project" | "source-control" | "jobs" | "board" | "wiki" | "agent" | "terminal" | "guardrails";
 
 const SpatialBoard = lazy(() => import("./components/SpatialBoard").then((module) => ({ default: module.SpatialBoard })));
 
@@ -108,16 +111,22 @@ const workspaceTabs: Array<{
   icon: string;
 }> = [
   {
-    id: "sessions",
-    label: "Sessions",
-    detail: "Browse and manage saved conversations.",
-    icon: "M4 5h16v12H7l-3 3V5Zm4 4h8m-8 4h5",
+    id: "documents",
+    label: "Documents",
+    detail: "Write and revisit documents linked to chats and projects.",
+    icon: "M6 3h8l4 4v14H6V3Zm8 0v5h5M9 12h6m-6 4h6",
   },
   {
     id: "project",
     label: "Projects",
     detail: "Project explorer and Monaco file view.",
     icon: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z",
+  },
+  {
+    id: "sessions",
+    label: "Sessions",
+    detail: "Browse and manage saved conversations.",
+    icon: "M4 5h16v12H7l-3 3V5Zm4 4h8m-8 4h5",
   },
   {
     id: "source-control",
@@ -253,12 +262,24 @@ export function App() {
     const tab = new URLSearchParams(window.location.search).get("tab");
     return isWorkspaceTab(tab) || tab === "artifacts" || tab === "chat";
   });
-  const [openTabs, setOpenTabs] = useState<WorkspaceTab[]>(() => canvasOpen ? [activeWorkspaceTab] : []);
   const [visitedTabs, setVisitedTabs] = useState<WorkspaceTab[]>(() => canvasOpen ? [activeWorkspaceTab] : []);
+  const [lastCanvasView, setLastCanvasView] = useState<"documents" | "project">(
+    () => activeWorkspaceTab === "project" ? "project" : "documents",
+  );
   const [canvasExpanded, setCanvasExpanded] = useState(false);
+  const [canvasHeaderSlot, setCanvasHeaderSlot] = useState<HTMLDivElement | null>(null);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [documentContext, setDocumentContext] = useState<ActiveCanvasContext>({ space: "Documents" });
+  const [projectContext, setProjectContext] = useState<ActiveCanvasContext>({ space: "Projects" });
+  const [wikiContext, setWikiContext] = useState<ActiveCanvasContext>({ space: "Wiki" });
   const showCanvas = canvasOpen && !mobileChat;
   const canvasTriggerRef = useRef<HTMLButtonElement>(null);
   const [projectFocus, setProjectFocus] = useState<{ path: string; request: number } | null>(null);
+  const [projectFileRequest, setProjectFileRequest] = useState<{ path: string; request: number } | null>(null);
+  const [projectBrowseRequest, setProjectBrowseRequest] = useState(0);
+  const [createdCanvasItem, setCreatedCanvasItem] = useState<CanvasDocument | null>(null);
+  const [openCreatedRequest, setOpenCreatedRequest] = useState(0);
+  const [canvasItemNotice, setCanvasItemNotice] = useState(false);
   const [sourceControlPath, setSourceControlPath] = useState("");
   const [updates, setUpdates] = useState<UpdatesStatus | null>(null);
   const refreshUpdates = useCallback((force = false) => {
@@ -488,35 +509,36 @@ export function App() {
   function selectWorkspaceTab(tab: WorkspaceTab) {
     if (mobileChat) return;
     setActiveWorkspaceTab(tab);
-    setOpenTabs((current) => current.includes(tab) ? current : [...current, tab]);
+    if (tab === "documents" || tab === "project") setLastCanvasView(tab);
     setVisitedTabs((current) => current.includes(tab) ? current : [...current, tab]);
     setCanvasOpen(true);
     persistWorkspaceTab(tab);
-    window.requestAnimationFrame(() => {
-      const selected = document.getElementById(`canvas-tab-${tab}`);
-      selected?.focus();
-      selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    });
   }
+
+  useEffect(() => {
+    function onCreated(event: Event) {
+      const detail = (event as CustomEvent<{ chatId: string; document: CanvasDocument }>).detail;
+      if (!detail?.document || detail.chatId !== activeChatId) return;
+      setCreatedCanvasItem(detail.document);
+      const activeDirty = showCanvas && (
+        (activeWorkspaceTab === "project" && projectContext.dirty) ||
+        (activeWorkspaceTab === "wiki" && wikiContext.dirty)
+      );
+      if (mobileChat || documentContext.dirty || activeDirty) {
+        setCanvasItemNotice(true);
+      } else {
+        setCanvasItemNotice(false);
+        setOpenCreatedRequest((current) => current + 1);
+        selectWorkspaceTab("documents");
+      }
+    }
+    window.addEventListener(CANVAS_ITEM_CREATED_EVENT, onCreated);
+    return () => window.removeEventListener(CANVAS_ITEM_CREATED_EVENT, onCreated);
+  }, [activeChatId, showCanvas, activeWorkspaceTab, projectContext.dirty, wikiContext.dirty, documentContext.dirty, mobileChat]);
 
   function closeCanvas() {
     setCanvasOpen(false);
     canvasTriggerRef.current?.focus();
-  }
-
-  function closeCanvasTab(tab: WorkspaceTab) {
-    const remaining = openTabs.filter((id) => id !== tab);
-    setOpenTabs(remaining);
-    if (remaining.length === 0) {
-      closeCanvas();
-    } else {
-      const next = activeWorkspaceTab === tab
-        ? remaining[Math.max(0, openTabs.indexOf(tab) - 1)]
-        : activeWorkspaceTab;
-      setActiveWorkspaceTab(next);
-      persistWorkspaceTab(next);
-      window.requestAnimationFrame(() => document.getElementById(`canvas-tab-${next}`)?.focus());
-    }
   }
 
   function openSourceControl(path: string) {
@@ -556,7 +578,7 @@ export function App() {
             type="button"
             aria-expanded={showCanvas}
             aria-controls="workbench-canvas"
-            onClick={() => canvasOpen ? closeCanvas() : selectWorkspaceTab(activeWorkspaceTab)}
+            onClick={() => canvasOpen ? closeCanvas() : selectWorkspaceTab(lastCanvasView)}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M14 4v16" /></svg>
             Canvas
@@ -627,28 +649,38 @@ export function App() {
             <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 5h16v12H7l-3 3V5Zm4 4h8m-8 4h5" /></svg>
             <span>Chat</span>
           </button>
-          <span className="activity-label">Workspace</span>
+          <span className="activity-label">Canvas</span>
           {workspaceTabs.map((tab) => (
-            <button
-              aria-current={canvasOpen && activeWorkspaceTab === tab.id ? "page" : undefined}
-              aria-label={tab.label}
-              className={`activity-btn ${canvasOpen && activeWorkspaceTab === tab.id ? "active" : ""}`}
-              key={tab.id}
-              onClick={() => selectWorkspaceTab(tab.id)}
-              title={tab.label}
-              type="button"
-            >
-              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d={tab.icon} />
-              </svg>
-              <span>{tab.label}</span>
-            </button>
+            <div className="activity-group-item" key={tab.id}>
+              {tab.id === "sessions" && <span className="activity-label">Tools</span>}
+              <button
+                aria-current={canvasOpen && activeWorkspaceTab === tab.id ? "page" : undefined}
+                aria-label={tab.label}
+                className={`activity-btn ${canvasOpen && activeWorkspaceTab === tab.id ? "active" : ""}`}
+                onClick={() => selectWorkspaceTab(tab.id)}
+                title={tab.label}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d={tab.icon} />
+                </svg>
+                <span>{tab.label}</span>
+              </button>
+            </div>
           ))}
           <p className="activity-footer">Your models.<br />Your rules.</p>
         </nav>}
 
         <section className="conversation-stage" aria-label="Conversation">
-          <AgentChat />
+          <AgentChat onActiveSessionChange={setActiveChatId} canvasNotice={canvasItemNotice && createdCanvasItem?.chat_id === activeChatId ? createdCanvasItem.title : undefined} onOpenCanvasItem={() => {
+            setCanvasItemNotice(false);
+            setOpenCreatedRequest((current) => current + 1);
+            selectWorkspaceTab("documents");
+          }} canvasContext={!showCanvas ? null
+            : activeWorkspaceTab === "documents" ? documentContext
+              : activeWorkspaceTab === "project" ? projectContext
+                : activeWorkspaceTab === "wiki" ? wikiContext
+                  : { space: workspaceTabs.find((tab) => tab.id === activeWorkspaceTab)?.label || "Workspace" }} />
         </section>
 
         <section
@@ -698,7 +730,12 @@ export function App() {
             title="Drag or use arrow keys to resize"
           />
           <header className="canvas-header">
-            <span className="canvas-heading">Canvas</span>
+            <div className="canvas-header-main">
+              <span className="canvas-heading">{activeWorkspaceTab === "documents" || activeWorkspaceTab === "project"
+                ? "Canvas"
+                : workspaceTabs.find((item) => item.id === activeWorkspaceTab)?.label}</span>
+              <div ref={setCanvasHeaderSlot} className="canvas-header-slot" hidden={activeWorkspaceTab !== "documents" && activeWorkspaceTab !== "project"} />
+            </div>
             <div className="canvas-actions">
               <button className="canvas-icon-btn" type="button" aria-label={canvasExpanded ? "Restore canvas size" : "Expand canvas"} aria-pressed={canvasExpanded} onClick={() => setCanvasExpanded((value) => !value)}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d={canvasExpanded ? "M4 9h5V4m11 11h-5v5M9 9 3 3m12 12 6 6" : "M9 4H4v5m11 11h5v-5M4 4l6 6m10 10-6-6"} /></svg>
@@ -708,73 +745,50 @@ export function App() {
               </button>
             </div>
           </header>
-          <div className="canvas-tabs" role="tablist" aria-label="Open canvas tools">
-            {openTabs.map((id) => {
-              const tab = workspaceTabs.find((item) => item.id === id)!;
-              return (
-                <div className={`canvas-tab${id === activeWorkspaceTab ? " selected" : ""}`} key={id} role="presentation">
-                  <button
-                    id={`canvas-tab-${id}`}
-                    role="tab"
-                    type="button"
-                    aria-selected={id === activeWorkspaceTab}
-                    aria-controls={`workspace-panel-${id}`}
-                    tabIndex={id === activeWorkspaceTab ? 0 : -1}
-                    onClick={() => selectWorkspaceTab(id)}
-                    onKeyDown={(event) => {
-                      const index = openTabs.indexOf(id);
-                      let next: WorkspaceTab | undefined;
-                      if (event.key === "ArrowRight") next = openTabs[(index + 1) % openTabs.length];
-                      if (event.key === "ArrowLeft") next = openTabs[(index + openTabs.length - 1) % openTabs.length];
-                      if (event.key === "Home") next = openTabs[0];
-                      if (event.key === "End") next = openTabs[openTabs.length - 1];
-                      if (event.key === "Delete") {
-                        event.preventDefault();
-                        closeCanvasTab(id);
-                      }
-                      if (next) {
-                        event.preventDefault();
-                        selectWorkspaceTab(next);
-                        document.getElementById(`canvas-tab-${next}`)?.focus();
-                      }
-                    }}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d={tab.icon} /></svg>
-                    {tab.label}
-                  </button>
-                  <button className="canvas-tab-close" type="button" aria-label={`Close ${tab.label} tab`} onClick={() => closeCanvasTab(id)}>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
-                  </button>
-                </div>
-              );
-            })}
-          </div>
           <div className="workspace-tab-panels">
+            <div className="canvas-content-panel" hidden={activeWorkspaceTab !== "documents" && activeWorkspaceTab !== "project"}>
+              {(visitedTabs.includes("documents") || visitedTabs.includes("project")) && <DocumentCanvas
+                chatId={activeChatId}
+                headerSlot={canvasHeaderSlot}
+                active={showCanvas && (activeWorkspaceTab === "documents" || activeWorkspaceTab === "project")}
+                onContextChange={setDocumentContext}
+                createdItem={createdCanvasItem}
+                openCreatedRequest={openCreatedRequest}
+                projectMode={activeWorkspaceTab === "project"}
+                activeProjectPath={projectContext.detail}
+                onOpenProjects={() => {
+                  setProjectBrowseRequest((current) => current + 1);
+                  selectWorkspaceTab("project");
+                }}
+                onOpenDocuments={() => selectWorkspaceTab("documents")}
+                onOpenProjectFile={(path) => {
+                  setProjectFileRequest((current) => ({ path, request: (current?.request ?? 0) + 1 }));
+                  selectWorkspaceTab("project");
+                }}
+                projectContent={<ProjectWorkspace
+                  chatId={activeChatId}
+                  focusPath={projectFocus?.path}
+                  focusRequest={projectFocus?.request}
+                  openFileRequest={projectFileRequest}
+                  browseRequest={projectBrowseRequest}
+                  onOpenSourceControl={openSourceControl}
+                  onContextChange={setProjectContext}
+                />}
+              />}
+            </div>
             <div
               hidden={activeWorkspaceTab !== "sessions"}
               id="workspace-panel-sessions"
-              role="tabpanel"
-              aria-labelledby="canvas-tab-sessions"
+              role="region"
+              aria-label="Sessions"
             >
               {visitedTabs.includes("sessions") && <SessionsWorkbench />}
             </div>
             <div
-              hidden={activeWorkspaceTab !== "project"}
-              id="workspace-panel-project"
-              role="tabpanel"
-              aria-labelledby="canvas-tab-project"
-            >
-              {visitedTabs.includes("project") && <ProjectWorkspace
-                focusPath={projectFocus?.path}
-                focusRequest={projectFocus?.request}
-                onOpenSourceControl={openSourceControl}
-              />}
-            </div>
-            <div
               hidden={activeWorkspaceTab !== "source-control"}
               id="workspace-panel-source-control"
-              role="tabpanel"
-              aria-labelledby="canvas-tab-source-control"
+              role="region"
+              aria-label="Source Control"
             >
               {visitedTabs.includes("source-control") && <SourceControlWorkbench
                 active={showCanvas && activeWorkspaceTab === "source-control"}
@@ -785,16 +799,16 @@ export function App() {
             <div
               hidden={activeWorkspaceTab !== "wiki"}
               id="workspace-panel-wiki"
-              role="tabpanel"
-              aria-labelledby="canvas-tab-wiki"
+              role="region"
+              aria-label="Wiki"
             >
-              {visitedTabs.includes("wiki") && <WikiWorkbench />}
+              {visitedTabs.includes("wiki") && <WikiWorkbench onContextChange={setWikiContext} />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "board"}
               id="workspace-panel-board"
-              role="tabpanel"
-              aria-labelledby="canvas-tab-board"
+              role="region"
+              aria-label="Spatial Board"
             >
               {visitedTabs.includes("board") && <ErrorBoundary label="Spatial Board">
                 <Suspense fallback={<PlannedWorkspacePane label="Spatial Board" detail="Loading canvas..." state="degraded" />}>
@@ -802,7 +816,7 @@ export function App() {
                 </Suspense>
               </ErrorBoundary>}
             </div>
-            <div hidden={activeWorkspaceTab !== "jobs"} id="workspace-panel-jobs" role="tabpanel" aria-labelledby="canvas-tab-jobs">
+            <div hidden={activeWorkspaceTab !== "jobs"} id="workspace-panel-jobs" role="region" aria-label="Job Board">
               {visitedTabs.includes("jobs") && <JobsBoard active={showCanvas && activeWorkspaceTab === "jobs"} onOpenFiles={(jobId) => {
                 setProjectFocus({ path: `jobs/${jobId}`, request: Date.now() });
                 selectWorkspaceTab("project");
@@ -811,16 +825,16 @@ export function App() {
             <div
               hidden={activeWorkspaceTab !== "agent"}
               id="workspace-panel-agent"
-              role="tabpanel"
-              aria-labelledby="canvas-tab-agent"
+              role="region"
+              aria-label="Agent Workbench"
             >
               {visitedTabs.includes("agent") && <AgentWorkbench />}
             </div>
             <div
               hidden={activeWorkspaceTab !== "terminal"}
               id="workspace-panel-terminal"
-              role="tabpanel"
-              aria-labelledby="canvas-tab-terminal"
+              role="region"
+              aria-label="Terminal"
             >
               {visitedTabs.includes("terminal") && <TerminalWorkbench
                 active={showCanvas && activeWorkspaceTab === "terminal"}
@@ -831,8 +845,8 @@ export function App() {
             <div
               hidden={activeWorkspaceTab !== "guardrails"}
               id="workspace-panel-guardrails"
-              role="tabpanel"
-              aria-labelledby="canvas-tab-guardrails"
+              role="region"
+              aria-label="Policy Settings"
             >
               {visitedTabs.includes("guardrails") && <GuardrailsWorkbench />}
             </div>

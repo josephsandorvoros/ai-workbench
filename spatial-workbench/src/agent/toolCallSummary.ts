@@ -19,6 +19,7 @@ const READ_ONLY_TOOLS = new Set([
   "web_fetch",
   "read_html_artifact",
   "read_code_file",
+  "read_canvas_document",
   "git_status",
   "search_wiki",
   "read_wiki_file",

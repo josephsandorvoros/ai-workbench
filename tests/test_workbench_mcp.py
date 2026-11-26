@@ -50,6 +50,81 @@ workbench_mcp = load_workbench_mcp()
 
 
 class WorkbenchMcpPreviewTests(unittest.TestCase):
+    def test_create_canvas_diagram_validates_and_forwards_kind_and_placement(self):
+        args = {"chat_id": "chat-1", "title": "Flow", "kind": "mermaid", "content": "flowchart LR\n A-->B", "placement": "inherit"}
+        with patch.object(workbench_mcp, "api_post", return_value={"document": {"id": "abc", "title": "Flow"}}) as post:
+            ok, output = workbench_mcp._create_canvas_diagram(args)
+        self.assertTrue(ok)
+        self.assertIn("abc", output)
+        post.assert_called_once_with("/api/workbench/documents/create-diagram", {**args, "project": None})
+        with patch.object(workbench_mcp, "api_post") as post:
+            ok, _ = workbench_mcp._create_canvas_diagram({**args, "kind": "invalid"})
+        self.assertFalse(ok)
+        post.assert_not_called()
+
+    def test_create_canvas_html_passes_chat_and_placement_to_api(self):
+        with patch.object(workbench_mcp, "api_post", return_value={"document": {"id": "abc", "title": "Chart"}}) as post:
+            ok, output = workbench_mcp._create_canvas_html({
+                "chat_id": "chat-1", "title": "Chart", "html": "<svg></svg>", "placement": "chat",
+            })
+        self.assertTrue(ok)
+        self.assertIn("abc", output)
+        post.assert_called_once_with("/api/workbench/documents/create-html", {
+            "chat_id": "chat-1", "title": "Chart", "html": "<svg></svg>", "placement": "chat", "project": None,
+        })
+
+    def test_create_canvas_office_validates_kind_and_forwards_model(self):
+        args = {
+            "chat_id": "chat-1", "title": "Forecast", "kind": "spreadsheet",
+            "content": '{"version":1,"sheets":[{"name":"Sheet1","cells":{}}]}',
+            "placement": "inherit",
+        }
+        with patch.object(workbench_mcp, "api_post", return_value={"document": {"id": "office-1", "title": "Forecast"}}) as post:
+            ok, output = workbench_mcp._create_canvas_office(args)
+        self.assertTrue(ok)
+        self.assertIn("office-1", output)
+        post.assert_called_once_with("/api/workbench/documents/create-office", {**args, "project": None})
+        with patch.object(workbench_mcp, "api_post") as post:
+            ok, _ = workbench_mcp._create_canvas_office({**args, "kind": "invalid"})
+        self.assertFalse(ok)
+        post.assert_not_called()
+        self.assertIn("create_canvas_office", {tool.name for tool in workbench_mcp.TOOLS})
+
+    def test_project_file_tools_send_current_metadata_without_force(self):
+        with patch.object(workbench_mcp, "api_get", return_value={"path": "demo/a.txt", "content": "before", "modified_ts": 12.5, "size_bytes": 6}), \
+             patch.object(workbench_mcp, "api_post", return_value={"path": "demo/a.txt", "size_bytes": 5}) as post:
+            ok, _ = workbench_mcp._edit_code_file({"path": "demo/a.txt", "old_string": "before", "new_string": "after"})
+        self.assertTrue(ok)
+        post.assert_called_once_with("/api/workspace/write", {
+            "path": "demo/a.txt", "content": "after", "expected_modified_ts": 12.5, "expected_size_bytes": 6,
+        })
+        with patch.object(workbench_mcp, "api_get", return_value={"modified_ts": 13.5, "size_bytes": 5}), \
+             patch.object(workbench_mcp, "api_post", return_value={"path": "demo/a.txt", "size_bytes": 0}) as post:
+            ok, _ = workbench_mcp._write_code_file({"path": "demo/a.txt", "contents": ""})
+        self.assertTrue(ok)
+        self.assertEqual(post.call_args.args[1], {
+            "path": "demo/a.txt", "content": "", "expected_modified_ts": 13.5, "expected_size_bytes": 5,
+        })
+
+    def test_canvas_document_tools_use_the_supplied_revision(self):
+        tools = {tool.name: tool for tool in workbench_mcp.TOOLS}
+        self.assertIn("read_canvas_document", tools)
+        self.assertIn("edit_canvas_document", tools)
+        with patch.object(workbench_mcp, "api_get", return_value={"documents": [
+            {"id": "doc-1", "title": "Notes", "content": "before", "revision": 3},
+        ]}):
+            ok, output = workbench_mcp._read_canvas_document({"id": "doc-1"})
+        self.assertTrue(ok)
+        self.assertIn('"revision": 3', output)
+        with patch.object(workbench_mcp, "api_post", return_value={"document": {"title": "Notes", "revision": 4}}) as post:
+            ok, _ = workbench_mcp._edit_canvas_document({"id": "doc-1", "revision": 3, "content": "after"})
+        self.assertTrue(ok)
+        post.assert_called_once_with("/api/workbench/documents/edit", {"id": "doc-1", "revision": 3, "content": "after"})
+        with patch.object(workbench_mcp, "api_post") as post:
+            ok, _ = workbench_mcp._edit_canvas_document({"id": "doc-1", "revision": True, "content": "after"})
+        self.assertFalse(ok)
+        post.assert_not_called()
+
     def test_gateway_registry_exposes_managed_preview_tools(self):
         tools = {tool.name: tool for tool in workbench_mcp.TOOLS}
         self.assertIn("start_app_preview", tools)

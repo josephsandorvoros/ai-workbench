@@ -299,17 +299,17 @@ def _read_code_file(args: dict):
 
 def _write_code_file(args: dict):
     path = to_workspace_relative_path(as_string(args.get("path")))
-    content = as_string(args.get("contents") or args.get("content"))
+    content = as_string(args.get("contents") if "contents" in args else args.get("content"))
     if not path:
         return False, "Missing path argument."
+    current = api_get(with_query("/api/workspace/status", {"path": path}))
     result = api_post(
         "/api/workspace/write",
         {
             "path": path,
             "content": content,
-            "expected_modified_ts": 0,
-            "expected_size_bytes": 0,
-            "force": True,
+            "expected_modified_ts": current["modified_ts"],
+            "expected_size_bytes": current["size_bytes"],
         },
     )
     return True, f"Wrote {result.get('size_bytes')} bytes to {result.get('path')}"
@@ -343,9 +343,8 @@ def _edit_code_file(args: dict):
         {
             "path": path,
             "content": updated,
-            "expected_modified_ts": 0,
-            "expected_size_bytes": 0,
-            "force": True,
+            "expected_modified_ts": doc["modified_ts"],
+            "expected_size_bytes": doc["size_bytes"],
         },
     )
     removed = old_string.count("\n") + 1
@@ -607,12 +606,72 @@ def _stop_app_preview(args: dict):
     api_post("/api/app-preview/stop", {"session_id": session_id})
     return True, f"Stopped app preview {session_id}."
 
+def _create_canvas_diagram(args: dict):
+    chat_id, title, kind, content, placement = (args.get(key) for key in ("chat_id", "title", "kind", "content", "placement"))
+    if not isinstance(chat_id, str) or not isinstance(title, str) or not isinstance(content, str) or kind not in ("mermaid", "excalidraw") or placement not in ("inherit", "chat", "project"):
+        return False, "A chat ID, title, diagram type, content, and valid placement are required."
+    result = api_post("/api/workbench/documents/create-diagram", {
+        "chat_id": chat_id, "title": title, "kind": kind, "content": content,
+        "placement": placement, "project": args.get("project"),
+    })
+    document = result["document"]
+    return True, f"Created Canvas diagram {document['title']!r} (ID {document['id']})."
+
+
+def _create_canvas_html(args: dict):
+    chat_id, title, html, placement = args.get("chat_id"), args.get("title"), args.get("html"), args.get("placement")
+    if not isinstance(chat_id, str) or not isinstance(title, str) or not isinstance(html, str) or placement not in ("inherit", "chat", "project"):
+        return False, "A chat ID, title, HTML source, and valid placement are required."
+    result = api_post("/api/workbench/documents/create-html", {
+        "chat_id": chat_id, "title": title, "html": html, "placement": placement, "project": args.get("project"),
+    })
+    document = result["document"]
+    return True, f"Created Canvas HTML {document['title']!r} (ID {document['id']})."
+
+def _create_canvas_office(args: dict):
+    chat_id, title, kind = (args.get(key) for key in ("chat_id", "title", "kind"))
+    content, placement = args.get("content"), args.get("placement")
+    if not isinstance(chat_id, str) or not isinstance(title, str) or not isinstance(content, str) or kind not in ("spreadsheet", "slides") or placement not in ("inherit", "chat", "project"):
+        return False, "A chat ID, title, spreadsheet or slide-deck type, Canvas JSON content, and valid placement are required."
+    result = api_post("/api/workbench/documents/create-office", {
+        "chat_id": chat_id, "title": title, "kind": kind, "content": content,
+        "placement": placement, "project": args.get("project"),
+    })
+    document = result["document"]
+    label = "spreadsheet" if kind == "spreadsheet" else "slide deck"
+    return True, f"Created Canvas {label} {document['title']!r} (ID {document['id']})."
+
+
+def _read_canvas_document(args: dict):
+    document_id = as_string(args.get("id")).strip()
+    if not document_id:
+        return False, "A document ID is required."
+    result = api_get("/api/workbench/documents")
+    document = next((doc for doc in result.get("documents", []) if doc.get("id") == document_id), None)
+    if document is None:
+        return False, "Canvas document not found."
+    return True, json.dumps({**{key: document[key] for key in ("id", "title", "content", "revision")}, "kind": document.get("kind", "markdown")})
+
+
+def _edit_canvas_document(args: dict):
+    document_id, revision, content = args.get("id"), args.get("revision"), args.get("content")
+    if not isinstance(document_id, str) or not document_id or not isinstance(revision, int) or isinstance(revision, bool) or not isinstance(content, str):
+        return False, "Document ID, integer revision, and content are required."
+    result = api_post("/api/workbench/documents/edit", {"id": document_id, "revision": revision, "content": content})
+    document = result["document"]
+    return True, f"Updated Canvas document {document['title']!r} to revision {document['revision']}. The previous version was saved."
+
 
 # ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
 
 HANDLERS = {
+    "create_canvas_diagram": _create_canvas_diagram,
+    "create_canvas_html": _create_canvas_html,
+    "create_canvas_office": _create_canvas_office,
+    "read_canvas_document": _read_canvas_document,
+    "edit_canvas_document": _edit_canvas_document,
     "git_status": _git_status,
     "git_commit": _git_commit,
     "git_pull_ff": _git_pull_ff,
@@ -655,6 +714,43 @@ def _tool(name, description, properties, required=None, **extra):
 
 
 TOOLS = [
+    _tool(
+        "create_canvas_diagram",
+        "Create a separate Canvas diagram. Use Mermaid source or Excalidraw scene JSON with an elements array. Reuse an existing location or ask the user where to save it.",
+        {"chat_id": {"type": "string"}, "title": {"type": "string"},
+         "kind": {"type": "string", "enum": ["mermaid", "excalidraw"]},
+         "content": {"type": "string", "description": "Complete Mermaid source or Excalidraw scene JSON. Excalidraw elements need unique IDs, types, x, y, width, height, and text when applicable."},
+         "placement": {"type": "string", "enum": ["inherit", "chat", "project"]}, "project": {"type": "string"}},
+        required=["chat_id", "title", "kind", "content", "placement"],
+    ),
+    _tool(
+        "create_canvas_html",
+        "Create an interactive HTML visualization for the current conversation. Reuse an existing location with inherit; otherwise ask the user to choose a chat draft or project.",
+        {"chat_id": {"type": "string"}, "title": {"type": "string"}, "html": {"type": "string"},
+         "placement": {"type": "string", "enum": ["inherit", "chat", "project"]}, "project": {"type": "string"}},
+        required=["chat_id", "title", "html", "placement"],
+    ),
+    _tool(
+        "create_canvas_office",
+        "Create an editable Canvas spreadsheet or slide deck using a complete version-1 JSON model. Spreadsheet cells use A1 addresses; slide geometry uses inches. Reuse an existing location or ask the user where to save it.",
+        {"chat_id": {"type": "string"}, "title": {"type": "string"},
+         "kind": {"type": "string", "enum": ["spreadsheet", "slides"]},
+         "content": {"type": "string", "description": "Complete JSON Canvas model. Spreadsheet {version:1,sheets:[{name,cells:{A1:{value},B2:{formula:'=SUM(A1:A1)',result}}}]}; slide deck {version:1,width:13.333,height:7.5,slides:[{background:'FFFFFF',elements:[{id,text,x,y,w,h,fontSize,color,bold,align}]}]}."},
+         "placement": {"type": "string", "enum": ["inherit", "chat", "project"]}, "project": {"type": "string"}},
+        required=["chat_id", "title", "kind", "content", "placement"],
+    ),
+    _tool(
+        "read_canvas_document",
+        "Read a Canvas document by its ID, including current content and revision. Read before editing.",
+        {"id": {"type": "string", "description": "ID supplied in the current Canvas context."}},
+        required=["id"],
+    ),
+    _tool(
+        "edit_canvas_document",
+        "Replace a Canvas item's complete content (Markdown, HTML, Mermaid, Excalidraw, spreadsheet, or slide-deck JSON). Use the revision returned by read_canvas_document; stale edits are rejected and the previous version is retained.",
+        {"id": {"type": "string"}, "revision": {"type": "integer"}, "content": {"type": "string"}},
+        required=["id", "revision", "content"],
+    ),
     # --- Git tools ---
     _tool(
         "git_status",

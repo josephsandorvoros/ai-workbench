@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ActiveCanvasContext } from "../agent/activeCanvasContext";
 import { compatClient, type CapabilityState, type WikiEntry, type WikiSearchResult } from "../api/compatClient";
 import { CollabHint } from "./CollabHint";
 import { Icon } from "./Icon";
@@ -43,7 +44,7 @@ function extractWikiLinkTargets(markdown: string): string[] {
   return [...targets];
 }
 
-export function WikiWorkbench() {
+export function WikiWorkbench({ onContextChange }: { onContextChange?: (context: ActiveCanvasContext) => void }) {
   const [currentPath, setCurrentPath] = useState("");
   const [entries, setEntries] = useState<WikiEntry[]>([]);
   const [treeEntries, setTreeEntries] = useState<Record<string, WikiEntry[]>>({});
@@ -53,6 +54,11 @@ export function WikiWorkbench() {
   /** Last known on-disk text, used to spot agent edits without stomping unsaved work. */
   const [savedContent, setSavedContent] = useState("");
   const [loadedPath, setLoadedPath] = useState("");
+  useEffect(() => {
+    onContextChange?.(loadedPath
+      ? { space: "Wiki", detail: loadedPath, content, dirty: content !== savedContent }
+      : { space: "Wiki", detail: "No note open" });
+  }, [onContextChange, loadedPath, content, savedContent]);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<WikiSearchResult[]>([]);
   const [status, setStatus] = useState<WikiStatus>("idle");

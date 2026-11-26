@@ -1,6 +1,24 @@
 # Workbench TODO
 
-Deferred ideas recorded on October 6, 2026. These are future work, not features currently available or changes scheduled for implementation.
+The Canvas checklist tracks work in progress. Other sections record deferred ideas, not features scheduled for implementation.
+
+## Generative Canvas
+
+Work one feature at a time: implement and verify it, then pause for review before starting the next. Do not automatically commit or deploy.
+
+- [x] Document canvas: create, edit, save, reopen, and download Markdown documents.
+- [x] AI document editing in the preview, with history and unsaved-edit protection.
+- [x] Unified canvas layout and navigation: one focused artifact beside chat, with related work in a header popover instead of switching tool tabs.
+- [x] Project files in the preview: chat links, focused editing, AI collaboration, and version recovery for Workbench writes.
+- [x] Interactive HTML and visualizations: verified with a tool-enabled direct API in an isolated test.
+- [x] Diagrams: visual Excalidraw and Mermaid source/preview, verified with a tool-enabled direct API in an isolated test.
+- [x] Spreadsheets and slides: editable Canvas items with XLSX/PPTX import and export.
+- [ ] Questions and forms.
+- [ ] Images.
+  - [x] Open and upload workspace images; crop and annotate into a new PNG copy.
+  - [ ] Verify image generation and editing through the configured Hermes provider, including workspace access and opening results.
+
+Completed items are in the development preview, not deployed. Canvas context includes the open Canvas item, project files, and wiki notes; other workspaces provide only their name. Hermes Gateway editing requires the updated Workbench MCP server and has not been verified; file changes made outside Workbench tools do not create Workbench history.
 
 ## User-Added Tools
 

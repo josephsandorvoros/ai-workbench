@@ -42,6 +42,24 @@ export function sourceNoticeHeader(text) {
   return header && /copyright|\(C\)/i.test(header) ? header : null;
 }
 
+export function browserExcludesPackage(frontend, locked, packageName) {
+  const parents = Object.entries(locked.packages).filter(([, entry]) => {
+    if (!entry || entry.dev) return false;
+    return Object.keys({
+      ...entry.dependencies,
+      ...entry.optionalDependencies,
+      ...entry.peerDependencies,
+    }).includes(packageName);
+  });
+  if (!parents.length) return false;
+  return parents.every(([relative]) => {
+    const manifestFile = path.join(frontend, relative, "package.json");
+    if (!existsSync(manifestFile)) return false;
+    const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
+    return manifest.browser && typeof manifest.browser === "object" && manifest.browser[packageName] === false;
+  });
+}
+
 export async function collectNotices(frontend, fetchNotice = fetch) {
   const project = path.resolve(frontend, "..");
   const policy = JSON.parse(readFileSync(path.join(project, "licenses", "frontend-sources.json"), "utf8"));
@@ -69,6 +87,7 @@ export async function collectNotices(frontend, fetchNotice = fetch) {
     }
     const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
     if (manifest.version !== entry.version) throw new Error(`Installed dependency differs from lockfile: ${relative}`);
+    if (browserExcludesPackage(frontend, locked, manifest.name)) continue;
     let license = packageLicense(manifest, entry);
     const override = policy.packages[`${manifest.name}@${manifest.version}`];
     if (!license && override?.license) license = override.license;
@@ -121,7 +140,7 @@ export async function generateNotices(frontend) {
   mkdirSync(output, { recursive: true });
   const sections = [
     "AI Workbench third-party notices",
-    "Workbench's MIT license does not replace the licenses below. This inventory covers installed locked runtime npm packages and Excalidraw fonts, not OS images or native Rust dependencies.",
+    "Workbench's MIT license does not replace the licenses below. This inventory covers installed locked runtime npm packages (excluding modules every runtime parent marks browser:false) and Excalidraw fonts, not OS images or native Rust dependencies.",
     readFileSync(path.join(project, "LICENSE"), "utf8"),
     readFileSync(path.join(project, "THIRD_PARTY_NOTICES.md"), "utf8"),
   ];

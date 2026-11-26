@@ -27,6 +27,7 @@ import {
 } from "../agent/slashMenu";
 import type { ChatMessage as ChatMlMessage } from "../agent/chatml";
 import { fetchSharedHermesContext } from "../agent/sharedContext";
+import { canvasContextPrompt, type ActiveCanvasContext } from "../agent/activeCanvasContext";
 import { LOCAL_VISUAL_TOOLS } from "../agent/boardTools";
 import { executeTool } from "../agent/toolExecutor";
 import { compatClient } from "../api/compatClient";
@@ -39,6 +40,8 @@ import { buildAttachmentPrompt, prepareAttachment, type ChatAttachment } from ".
 import { loadRemoteWorkbenchState, saveRemoteWorkbenchField } from "../agent/workbenchRemote";
 import {
   CHAT_SESSIONS_CHANGED_EVENT,
+  CANVAS_DOCUMENT_CREATED_EVENT,
+  CANVAS_PROJECT_FILE_LINKED_EVENT,
   LOAD_CHAT_SESSION_EVENT,
   loadSavedChatSessions,
   persistSavedChatSessions,
@@ -136,6 +139,10 @@ function createChatSessionId() {
 interface AgentChatProps {
   /** Optional override for the provider label (defaults to the live shared provider). */
   labelOverride?: string;
+  onActiveSessionChange?: (id: string) => void;
+  canvasContext?: ActiveCanvasContext | null;
+  canvasNotice?: string;
+  onOpenCanvasItem?: () => void;
 }
 
 function formatTime(timestamp: number) {
@@ -320,7 +327,7 @@ function handleSlashCommand(
   }
 }
 
-export function AgentChat({ labelOverride }: AgentChatProps) {
+export function AgentChat({ labelOverride, onActiveSessionChange, canvasContext = null, canvasNotice, onOpenCanvasItem }: AgentChatProps) {
   const providerConfig = useAgentProvider();
   const isGatewayProvider = providerConfig.baseUrl.replace(/\/+$/, "") === "/hermes-gw";
   const [savedSessions, setSavedSessions] = useState<SavedChatSession[]>(loadSavedChatSessions);
@@ -343,6 +350,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
       return loadSessionMessages();
     }
   });
+  useEffect(() => { onActiveSessionChange?.(activeSessionId); }, [activeSessionId, onActiveSessionChange]);
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   const mobileChat = useMobileChat();
@@ -1178,6 +1186,27 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
   }, [savedSessions]);
 
   useEffect(() => {
+    function handleDocumentCreated(event: Event) {
+      const detail = (event as CustomEvent<{ chatId: string }>).detail;
+      if (detail?.chatId !== activeSessionId || messages.length > 0) return;
+      setSavedSessions((current) => {
+        if (current.some((session) => session.id === activeSessionId)) return current;
+        const title = event.type === CANVAS_PROJECT_FILE_LINKED_EVENT ? "Project file chat" : "Document chat";
+        const next = [{ id: activeSessionId, title, updatedAt: Date.now(), messages: [] }, ...current].slice(0, 50);
+        persistSavedChatSessions(next);
+        if (remoteSessionsLoaded.current) void saveRemoteWorkbenchField("chat_sessions", next);
+        return next;
+      });
+    }
+    window.addEventListener(CANVAS_DOCUMENT_CREATED_EVENT, handleDocumentCreated);
+    window.addEventListener(CANVAS_PROJECT_FILE_LINKED_EVENT, handleDocumentCreated);
+    return () => {
+      window.removeEventListener(CANVAS_DOCUMENT_CREATED_EVENT, handleDocumentCreated);
+      window.removeEventListener(CANVAS_PROJECT_FILE_LINKED_EVENT, handleDocumentCreated);
+    };
+  }, [activeSessionId, messages]);
+
+  useEffect(() => {
     const handleLoad = (event: Event) => {
       if (isThinking) return;
       if (isStartingSpeech || isRecordingSpeech || isTranscribingSpeech) {
@@ -1513,7 +1542,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
     }));
     const chips = [...contextChips, ...parsedChips, ...attachmentChips];
     const text = cleanText || rawText;
-    const promptText = [buildContextPrompt(chips), buildAttachmentPrompt(attachments), commandPrompt ?? text]
+    const promptText = [canvasContextPrompt(canvasContext, activeSessionId), buildContextPrompt(chips), buildAttachmentPrompt(attachments), commandPrompt ?? text]
       .filter(Boolean)
       .join("\n\n");
     const images = attachments.flatMap((item) => (item.dataUrl ? [item.dataUrl] : []));
@@ -1609,7 +1638,7 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
           const toolRecords: ToolCallRecord[] = [];
           for (let iteration = 0; iteration < 6; iteration += 1) {
             if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-            setReasoningText(iteration === 0 ? "Planning with the Spatial Board…" : "Updating the Spatial Board…");
+            setReasoningText(iteration === 0 ? "Planning with available tools…" : "Working with available tools…");
             const result = await client.chat(toolConvo, LOCAL_VISUAL_TOOLS, { maxTokens: 1024, signal });
             reply = result.text;
             if (result.toolCalls.length === 0) break;
@@ -1641,10 +1670,10 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
 
               let output: string;
               if (mutating && providerConfig.agentMode === "plan") {
-                output = "Plan mode: tool was not executed. Describe the proposed board change for approval.";
+                output = "Plan mode: tool was not executed. Describe the proposed change for approval.";
                 record.status = "denied";
               } else if (mutating && !(await askToolApproval(record.id, providerConfig))) {
-                output = "User denied this Spatial Board change.";
+                output = "User denied this change.";
                 record.status = "denied";
               } else {
                 record.status = "running";
@@ -2090,6 +2119,16 @@ export function AgentChat({ labelOverride }: AgentChatProps) {
         </div>
       )}
       <div className="agent-chat-input-row">
+        {canvasNotice && <div className="document-meta" role="status">Created {canvasNotice}. <button type="button" className="document-refresh" onClick={onOpenCanvasItem} disabled={mobileChat}>{mobileChat ? "Open Canvas on desktop" : "Open in Canvas"}</button></div>}
+        {canvasContext && <div className="document-meta" role="status">
+          Canvas context: {canvasContext.space}{canvasContext.detail ? ` · ${canvasContext.detail}` : ""}{canvasContext.dirty ? " · unsaved" : ""}
+          {!canvasContext.detail && !canvasContext.documentId ? " · workspace name only" : ""}
+          {canvasContext.documentId && (isGatewayProvider
+            ? " · editing requires updated Gateway Workbench tools"
+            : providerConfig.kind !== "api" || !(providerConfig.allowLocalBoard || providerConfig.allowWebFetch)
+              ? " · document editing tools unavailable for this provider"
+              : "")}
+        </div>}
         {isThinking && providerConfig.kind === "api" && providerConfig.baseUrl.replace(/\/+$/, "") === "/hermes-gw"
           && loadActiveHermesRuns()[activeSessionId] ? (
           <form className="agent-chat-steer" onSubmit={(event) => void handleSteer(event)}>

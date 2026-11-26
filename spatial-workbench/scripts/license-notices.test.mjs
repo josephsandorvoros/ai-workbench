@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { checkedNotice, localNotices, packageLicense, sourceNoticeHeader } from "./license-notices.mjs";
+import { browserExcludesPackage, checkedNotice, localNotices, packageLicense, sourceNoticeHeader } from "./license-notices.mjs";
 
 test("recognizes legacy license metadata without assuming unknown means MIT", () => {
   assert.equal(packageLicense({ licenses: [{ type: "MIT" }] }, {}), "MIT");
@@ -42,6 +42,27 @@ test("changed upstream text fails closed", () => {
   const hash = createHash("sha256").update(text).digest("hex");
   assert.equal(checkedNotice(text, hash, "example"), text);
   assert.throws(() => checkedNotice("different license", hash, "example"), /Upstream license changed/);
+});
+
+test("ignores a runtime dependency only when every parent excludes it from browser builds", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "workbench-license-"));
+  try {
+    const parent = path.join(directory, "node_modules", "pptxgenjs");
+    const child = path.join(directory, "node_modules", "https");
+    mkdirSync(parent, { recursive: true });
+    mkdirSync(child, { recursive: true });
+    writeFileSync(path.join(parent, "package.json"), JSON.stringify({ browser: { https: false } }));
+    writeFileSync(path.join(child, "package.json"), JSON.stringify({ name: "https", version: "1.0.0" }));
+    const locked = { packages: {
+      "node_modules/pptxgenjs": { dependencies: { https: "^1.0.0" } },
+      "node_modules/https": {},
+    } };
+    assert.equal(browserExcludesPackage(directory, locked, "https"), true);
+    writeFileSync(path.join(parent, "package.json"), JSON.stringify({ browser: {} }));
+    assert.equal(browserExcludesPackage(directory, locked, "https"), false);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
 });
 
 test("preserves source-header copyright and Zlib conditions without including executable code", () => {

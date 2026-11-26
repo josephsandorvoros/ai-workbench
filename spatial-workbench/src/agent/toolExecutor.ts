@@ -10,6 +10,7 @@ import {
 } from "./canvasManifest";
 import { loadHtmlArtifact, saveHtmlArtifact } from "./htmlArtifact";
 import { saveRemoteWorkbenchField } from "./workbenchRemote";
+import { CANVAS_ITEM_CREATED_EVENT } from "./chatSessions";
 
 /**
  * Real execution handlers for the Hermes agent tool schemas.
@@ -105,6 +106,59 @@ export async function executeTool(
 ): Promise<ToolExecutionResult> {
   try {
     switch (name) {
+      case "create_canvas_diagram": {
+        const { chat_id: chatId, title, kind, content, placement, project } = args;
+        if (typeof chatId !== "string" || typeof title !== "string" || typeof content !== "string" ||
+            (kind !== "mermaid" && kind !== "excalidraw") ||
+            (placement !== "inherit" && placement !== "chat" && placement !== "project") ||
+            (project !== undefined && typeof project !== "string")) {
+          return { ok: false, output: "A chat ID, title, diagram type, content, and valid placement are required." };
+        }
+        const result = await compatClient.createCanvasDiagram(chatId, title, kind, content, placement, project);
+        window.dispatchEvent(new CustomEvent(CANVAS_ITEM_CREATED_EVENT, { detail: { chatId, document: result.document } }));
+        return { ok: true, output: `Created Canvas diagram "${result.document.title}" (ID ${result.document.id}).` };
+      }
+      case "create_canvas_html": {
+        const { chat_id: chatId, title, html, placement, project } = args;
+        if (typeof chatId !== "string" || typeof title !== "string" || typeof html !== "string" ||
+            (placement !== "inherit" && placement !== "chat" && placement !== "project") ||
+            (project !== undefined && typeof project !== "string")) {
+          return { ok: false, output: "A chat ID, title, HTML source, and valid placement are required." };
+        }
+        const result = await compatClient.createCanvasHtml(chatId, title, html, placement, project);
+        window.dispatchEvent(new CustomEvent(CANVAS_ITEM_CREATED_EVENT, { detail: { chatId, document: result.document } }));
+        return { ok: true, output: `Created Canvas HTML "${result.document.title}" (ID ${result.document.id}).` };
+      }
+      case "create_canvas_office": {
+        const { chat_id: chatId, title, kind, content, placement, project } = args;
+        if (typeof chatId !== "string" || typeof title !== "string" || typeof content !== "string" ||
+            (kind !== "spreadsheet" && kind !== "slides") ||
+            (placement !== "inherit" && placement !== "chat" && placement !== "project") ||
+            (project !== undefined && typeof project !== "string")) {
+          return { ok: false, output: "A chat ID, title, spreadsheet or slide-deck type, Canvas JSON content, and valid placement are required." };
+        }
+        const result = await compatClient.createCanvasOffice(chatId, title, kind, content, placement, project);
+        window.dispatchEvent(new CustomEvent(CANVAS_ITEM_CREATED_EVENT, { detail: { chatId, document: result.document } }));
+        return { ok: true, output: `Created Canvas ${kind === "spreadsheet" ? "spreadsheet" : "slide deck"} "${result.document.title}" (ID ${result.document.id}).` };
+      }
+      case "read_canvas_document": {
+        const id = typeof args.id === "string" ? args.id : "";
+        if (!id) return { ok: false, output: "A document ID is required." };
+        const result = await compatClient.listCanvasDocuments();
+        const document = result.documents.find((item) => item.id === id);
+        if (!document) return { ok: false, output: "Canvas document not found." };
+        return { ok: true, output: JSON.stringify({ id: document.id, title: document.title, content: document.content, revision: document.revision, kind: document.kind ?? "markdown" }) };
+      }
+
+      case "edit_canvas_document": {
+        const id = typeof args.id === "string" ? args.id : "";
+        if (!id || !Number.isInteger(args.revision) || typeof args.revision !== "number" || typeof args.content !== "string") {
+          return { ok: false, output: "Document ID, integer revision, and content are required." };
+        }
+        const result = await compatClient.editCanvasDocument(id, args.revision, args.content);
+        return { ok: true, output: `Updated Canvas document "${result.document.title}" to revision ${result.document.revision}. The previous version was saved.` };
+      }
+
       case "git_status": {
         const path = toWorkspaceRelativePath(String(args.path ?? ""));
         if (!path) return { ok: false, output: "Missing project repository path." };
@@ -150,7 +204,8 @@ export async function executeTool(
         const path = toWorkspaceRelativePath(String(args.path ?? ""));
         const content = String(args.contents ?? args.content ?? "");
         if (!path) return { ok: false, output: "Missing path argument." };
-        const result = await compatClient.writeWorkspaceFile(path, content, 0, 0, true);
+        const current = await compatClient.getWorkspaceFileStatus(path);
+        const result = await compatClient.writeWorkspaceFile(path, content, current.modified_ts, current.size_bytes);
         return {
           ok: true,
           output: `Wrote ${result.size_bytes} bytes to ${result.path}`,
@@ -178,7 +233,7 @@ export async function executeTool(
         }
 
         const updated = original.slice(0, first) + newString + original.slice(first + oldString.length);
-        const result = await compatClient.writeWorkspaceFile(path, updated, 0, 0, true);
+        const result = await compatClient.writeWorkspaceFile(path, updated, doc.modified_ts, doc.size_bytes);
         const removed = oldString.split("\n").length;
         const added = newString.split("\n").length;
         return {

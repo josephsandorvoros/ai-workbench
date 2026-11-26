@@ -17,6 +17,27 @@ export interface AppConfig {
   stats_label?: string;
 }
 
+export type CanvasItemKind = "markdown" | "html" | "mermaid" | "excalidraw" | "spreadsheet" | "slides";
+
+export interface CanvasDocument {
+  id: string;
+  title: string;
+  content: string;
+  chat_id: string;
+  project: string | null;
+  revision: number;
+  updated_at: number;
+  versions?: CanvasDocumentVersion[];
+  kind?: CanvasItemKind;
+}
+
+export interface CanvasDocumentVersion {
+  id: string;
+  revision: number;
+  title: string;
+  content: string;
+  updated_at: number;
+}
 export interface ComponentUpdate {
   current: string | null;
   latest: string | null;
@@ -388,6 +409,17 @@ function withQuery(path: string, query: Record<string, string | number>) {
 export const compatClient = {
   apiBaseUrl: apiBaseUrl || "same-origin /api",
   getConfig: () => getJson<AppConfig>("/api/config"),
+  listCanvasDocuments: () => getJson<{ ok: boolean; documents: CanvasDocument[] }>("/api/workbench/documents"),
+  saveCanvasDocument: (document: Omit<CanvasDocument, "id" | "revision" | "updated_at" | "versions"> & { id?: string; revision?: number; source?: "restore" }) =>
+    postJson<{ ok: boolean; document: CanvasDocument }>("/api/workbench/documents", document),
+  editCanvasDocument: (id: string, revision: number, content: string) =>
+    postJson<{ ok: boolean; document: CanvasDocument }>("/api/workbench/documents/edit", { id, revision, content }),
+  createCanvasHtml: (chatId: string, title: string, html: string, placement: "inherit" | "chat" | "project", project?: string) =>
+    postJson<{ ok: boolean; document: CanvasDocument }>("/api/workbench/documents/create-html", { chat_id: chatId, title, html, placement, project }),
+  createCanvasDiagram: (chatId: string, title: string, kind: "mermaid" | "excalidraw", content: string, placement: "inherit" | "chat" | "project", project?: string) =>
+    postJson<{ ok: boolean; document: CanvasDocument }>("/api/workbench/documents/create-diagram", { chat_id: chatId, title, kind, content, placement, project }),
+  createCanvasOffice: (chatId: string, title: string, kind: "spreadsheet" | "slides", content: string, placement: "inherit" | "chat" | "project", project?: string) =>
+    postJson<{ ok: boolean; document: CanvasDocument }>("/api/workbench/documents/create-office", { chat_id: chatId, title, kind, content, placement, project }),
   getSandboxStatus: () => getJson<SandboxStatus>("/api/sandbox/status"),
   getUpdates: (refresh = false) => getJson<UpdatesStatus>(refresh ? "/api/updates?refresh=1" : "/api/updates"),
   getStats: () => getJson<NodeStats>("/api/stats"),
@@ -413,6 +445,16 @@ export const compatClient = {
   listWorkspace: (path = "") => getJson<WorkspaceListResponse>(withQuery("/api/workspace/list", { path })),
   readWorkspaceFile: (path: string) => getJson<WorkspaceDocumentResponse>(withQuery("/api/workspace/read", { path })),
   getWorkspaceFileStatus: (path: string) => getJson<WorkspaceFileStatusResponse>(withQuery("/api/workspace/status", { path })),
+  getWorkspaceFileHistory: (path: string) =>
+    getJson<{ ok: boolean; path: string; versions: { id: string; created_at: number }[] }>(withQuery("/api/workspace/history", { path })),
+  getCanvasProjectFiles: (chatId: string) =>
+    getJson<{ ok: boolean; files: string[] }>(withQuery("/api/workbench/project-files", { chat_id: chatId })),
+  updateCanvasProjectFile: (chatId: string, path: string, action: "link" | "unlink") =>
+    postJson<{ ok: boolean; files: string[] }>("/api/workbench/project-files", { chat_id: chatId, path, action }),
+  restoreWorkspaceFile: (path: string, versionId: string, expectedModifiedTs: number, expectedSizeBytes: number) =>
+    postJson<WorkspaceWriteResponse>("/api/workspace/restore", {
+      path, version_id: versionId, expected_modified_ts: expectedModifiedTs, expected_size_bytes: expectedSizeBytes,
+    }),
   writeWorkspaceFile: (
     path: string,
     content: string,

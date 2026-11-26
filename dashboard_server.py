@@ -10,6 +10,7 @@ import hmac
 import http.client
 import io
 import json
+import math
 import mimetypes
 import os
 import sys
@@ -329,6 +330,8 @@ class DashboardState:
         self.workspace_ignored_dirs = {".git", "__pycache__", "node_modules", "dist", "target", ".venv", "venv"}
         self.workbench_state_path = HERMES_HOME / "spatial-workbench" / "state.json"
         self.workbench_state_lock = threading.Lock()
+        self.canvas_documents_path = HERMES_HOME / "spatial-workbench" / "documents.json"
+        self.canvas_project_files_path = HERMES_HOME / "spatial-workbench" / "project-files.json"
         self.gateway_session_ids_path = HERMES_HOME / "spatial-workbench" / "gateway_session_ids.json"
         try:
             stored_gateway_sessions = json.loads(self.gateway_session_ids_path.read_text(encoding="utf-8"))
@@ -575,6 +578,303 @@ class DashboardState:
                 }
             except OSError as exc:
                 return {"ok": False, "message": f"Artifact read failed: {exc}"}
+
+    def list_canvas_documents(self):
+        with self.workbench_state_lock:
+            try:
+                if not self.canvas_documents_path.exists():
+                    documents = []
+                else:
+                    documents = json.loads(self.canvas_documents_path.read_text(encoding="utf-8"))
+                    if not isinstance(documents, list):
+                        raise ValueError("Invalid document library")
+                return {"ok": True, "documents": documents}
+            except (OSError, ValueError) as exc:
+                return {"ok": False, "message": f"Document library unavailable: {exc}"}
+
+    @staticmethod
+    def _validate_canvas_office(kind, content):
+        def reject_constant(_value):
+            raise ValueError("Non-standard numeric value")
+
+        try:
+            model = json.loads(content, parse_constant=reject_constant)
+        except (json.JSONDecodeError, ValueError):
+            raise ValueError("Office Canvas data must be valid JSON") from None
+
+        def finite_number(value):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return False
+            try:
+                return math.isfinite(value)
+            except OverflowError:
+                return False
+
+        def valid_color(value):
+            return isinstance(value, str) and re.fullmatch(r"#?[0-9a-fA-F]{6}", value) is not None
+
+        if (not isinstance(model, dict) or model.get("version") != 1
+                or isinstance(model.get("version"), bool)):
+            raise ValueError("Office Canvas data must use version 1")
+        if kind == "spreadsheet":
+            sheets = model.get("sheets")
+            if not isinstance(sheets, list) or not 1 <= len(sheets) <= 50:
+                raise ValueError("A Canvas spreadsheet must contain between 1 and 50 sheets")
+            names = set()
+            total_cells = 0
+            for sheet in sheets:
+                if not isinstance(sheet, dict):
+                    raise ValueError("Spreadsheet sheets must be objects")
+                name, cells = sheet.get("name"), sheet.get("cells")
+                if (not isinstance(name, str) or not name.strip() or len(name) > 31
+                        or any(character in name for character in ':\\/?*[]') or name.casefold() in names):
+                    raise ValueError("Spreadsheet sheet names must be unique, valid Excel names of up to 31 characters")
+                names.add(name.casefold())
+                if not isinstance(cells, dict):
+                    raise ValueError("Spreadsheet cells must be an address-to-value object")
+                total_cells += len(cells)
+                if total_cells > 20_000:
+                    raise ValueError("A Canvas spreadsheet may contain at most 20,000 populated cells")
+                for address, cell in cells.items():
+                    if not isinstance(address, str) or re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]{0,5}", address) is None:
+                        raise ValueError("Spreadsheet cells must use uppercase Excel addresses such as A1")
+                    letters = re.match(r"[A-Z]+", address).group(0)
+                    column = 0
+                    for letter in letters:
+                        column = column * 26 + ord(letter) - ord("A") + 1
+                    row = int(re.search(r"[0-9]+$", address).group(0))
+                    if column > 16_384 or row > 100_000 or not isinstance(cell, dict):
+                        raise ValueError("Spreadsheet cells must be within the supported row and column limits")
+                    formula = cell.get("formula")
+                    if formula is not None:
+                        if not isinstance(formula, str) or not formula.startswith("=") or len(formula) > 8_192:
+                            raise ValueError("Spreadsheet formulas must start with = and be no longer than 8,192 characters")
+                    for field in ("value", "result"):
+                        value = cell.get(field)
+                        if value is not None and not (
+                            isinstance(value, (str, bool)) or
+                            finite_number(value)
+                        ):
+                            raise ValueError("Spreadsheet cell values must be text, numbers, booleans, or null")
+            return
+
+        width, height, slides = model.get("width"), model.get("height"), model.get("slides")
+        if not finite_number(width) or not finite_number(height) or not 1 <= width <= 30 or not 1 <= height <= 30:
+            raise ValueError("Slide dimensions must be between 1 and 30 inches")
+        if not isinstance(slides, list) or not 1 <= len(slides) <= 100:
+            raise ValueError("A Canvas slide deck must contain between 1 and 100 slides")
+        for slide in slides:
+            if not isinstance(slide, dict) or not valid_color(slide.get("background")):
+                raise ValueError("Each slide must have a six-digit background color")
+            elements = slide.get("elements")
+            if not isinstance(elements, list) or len(elements) > 100:
+                raise ValueError("Each slide may contain at most 100 text elements")
+            ids = set()
+            for element in elements:
+                if not isinstance(element, dict):
+                    raise ValueError("Slide text elements must be objects")
+                element_id, text = element.get("id"), element.get("text")
+                if not isinstance(element_id, str) or not element_id or element_id in ids or not isinstance(text, str) or len(text) > 5_000:
+                    raise ValueError("Slide text elements need unique IDs and text of up to 5,000 characters")
+                ids.add(element_id)
+                x, y, item_width, item_height = (element.get(field) for field in ("x", "y", "w", "h"))
+                if (not all(finite_number(value) for value in (x, y, item_width, item_height))
+                        or x < 0 or y < 0 or item_width <= 0 or item_height <= 0
+                        or x + item_width > width + 0.001 or y + item_height > height + 0.001):
+                    raise ValueError("Slide text positions and sizes must fit within the slide")
+                font_size = element.get("fontSize")
+                if not finite_number(font_size) or not 8 <= font_size <= 96:
+                    raise ValueError("Slide font sizes must be between 8 and 96 points")
+                if not valid_color(element.get("color")) or not isinstance(element.get("bold"), bool):
+                    raise ValueError("Slide text needs a valid color and bold setting")
+                if element.get("align") not in ("left", "center", "right"):
+                    raise ValueError("Slide text alignment must be left, center, or right")
+                if element.get("fill") is not None and not valid_color(element["fill"]):
+                    raise ValueError("Slide text fill must be a six-digit color")
+
+    def save_canvas_document(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("Document data is required")
+        document_id = payload.get("id")
+        title, content = payload.get("title"), payload.get("content")
+        chat_id, project = payload.get("chat_id"), payload.get("project")
+        kind = payload.get("kind", "markdown")
+        if kind not in ("markdown", "html", "mermaid", "excalidraw", "spreadsheet", "slides"):
+            raise ValueError("Invalid Canvas item type")
+        if not isinstance(title, str) or not title.strip() or len(title) > 200:
+            raise ValueError("A document title of up to 200 characters is required")
+        if not isinstance(content, str) or len(content.encode("utf-8")) > 2_000_000:
+            raise ValueError("Document content must be text no larger than 2 MB")
+        if kind in ("spreadsheet", "slides"):
+            self._validate_canvas_office(kind, content)
+        if kind == "excalidraw":
+            try:
+                scene = json.loads(content)
+            except json.JSONDecodeError:
+                raise ValueError("Visual diagram must be valid Excalidraw JSON") from None
+            if not isinstance(scene, dict) or not isinstance(scene.get("elements"), list) or not all(isinstance(element, dict) for element in scene["elements"]):
+                raise ValueError("Visual diagram must contain an elements array")
+            if not isinstance(scene.get("files", {}), dict):
+                raise ValueError("Visual diagram files must be an object")
+            if not isinstance(scene.get("appState", {}), dict):
+                raise ValueError("Visual diagram appState must be an object")
+            ids = set()
+            for element in scene["elements"]:
+                element_id = element.get("id")
+                if not isinstance(element_id, str) or not element_id or element_id in ids or not isinstance(element.get("type"), str) or not element["type"]:
+                    raise ValueError("Visual diagram elements require unique IDs and types")
+                ids.add(element_id)
+                for key in ("x", "y", "width", "height"):
+                    value = element.get(key)
+                    try:
+                        valid_number = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+                    except OverflowError:
+                        valid_number = False
+                    if not valid_number:
+                        raise ValueError("Visual diagram elements require finite coordinates and dimensions")
+            try:
+                json.dumps(scene, allow_nan=False)
+            except ValueError:
+                raise ValueError("Visual diagram cannot contain non-finite numbers") from None
+        if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", chat_id):
+            raise ValueError("A valid chat ID is required")
+        if project is not None:
+            if not isinstance(project, str) or not project.strip():
+                raise ValueError("A project folder is required")
+            folder = self._resolve_workspace_path(project, must_exist=True)
+            try:
+                project = str(folder.relative_to(self.workspace_root))
+            except ValueError:
+                raise ValueError("Project must be within the workspace") from None
+            if not folder.is_dir():
+                raise ValueError("Project must be a folder")
+        with self.workbench_state_lock:
+            try:
+                documents = json.loads(self.canvas_documents_path.read_text(encoding="utf-8")) if self.canvas_documents_path.exists() else []
+                if not isinstance(documents, list):
+                    raise ValueError("Invalid document library")
+                existing = next((doc for doc in documents if doc.get("id") == document_id), None) if document_id else None
+                if document_id and not existing:
+                    raise ValueError("Document not found")
+                if existing and kind != existing.get("kind", "markdown"):
+                    raise ValueError("Canvas item type cannot be changed")
+                if existing and payload.get("revision") != existing["revision"]:
+                    return {"ok": False, "status": "conflict", "message": "Document changed elsewhere. Your edits have not been saved."}
+                versions = list(existing.get("versions", [])) if existing else []
+                if existing and payload.get("source") in ("ai", "restore"):
+                    versions.insert(0, {
+                        "id": uuid.uuid4().hex,
+                        "revision": existing["revision"],
+                        "title": existing["title"],
+                        "content": existing["content"],
+                        "updated_at": existing["updated_at"],
+                    })
+                document = {
+                    "id": existing["id"] if existing else uuid.uuid4().hex,
+                    "title": title.strip(), "content": content, "chat_id": chat_id,
+                    "kind": kind,
+                    "project": project, "revision": existing["revision"] + 1 if existing else 1,
+                    "updated_at": int(time.time() * 1000),
+                    "versions": versions,
+                }
+                documents = [document, *(doc for doc in documents if doc.get("id") != document["id"])]
+                temp_path = self.canvas_documents_path.with_suffix(".tmp")
+                temp_path.write_text(json.dumps(documents, ensure_ascii=False), encoding="utf-8")
+                temp_path.replace(self.canvas_documents_path)
+                return {"ok": True, "document": document}
+            except (OSError, json.JSONDecodeError) as exc:
+                return {"ok": False, "message": f"Document save failed: {exc}"}
+
+    def edit_canvas_document(self, payload):
+        if not isinstance(payload, dict) or not isinstance(payload.get("id"), str):
+            raise ValueError("A document ID is required")
+        if not isinstance(payload.get("revision"), int) or isinstance(payload.get("revision"), bool):
+            raise ValueError("The document revision is required")
+        if not isinstance(payload.get("content"), str):
+            raise ValueError("Document content must be text")
+        result = self.list_canvas_documents()
+        if not result.get("ok"):
+            return result
+        document = next((doc for doc in result["documents"] if doc.get("id") == payload["id"]), None)
+        if not document:
+            raise ValueError("Document not found")
+        return self.save_canvas_document({
+            **document,
+            "revision": payload["revision"],
+            "content": payload["content"],
+            "source": "ai",
+        })
+
+    def create_canvas_html(self, payload):
+        return self.create_canvas_item(payload, "html", "html")
+
+    def create_canvas_diagram(self, payload):
+        if not isinstance(payload, dict) or payload.get("kind") not in ("mermaid", "excalidraw"):
+            raise ValueError("Choose a Mermaid or visual diagram")
+        return self.create_canvas_item(payload, payload["kind"], "content")
+
+    def create_canvas_office(self, payload):
+        if not isinstance(payload, dict) or payload.get("kind") not in ("spreadsheet", "slides"):
+            raise ValueError("Choose a spreadsheet or slide deck")
+        return self.create_canvas_item(payload, payload["kind"], "content")
+
+    def create_canvas_item(self, payload, kind, content_key):
+        if not isinstance(payload, dict):
+            raise ValueError("Canvas item data is required")
+        chat_id = payload.get("chat_id")
+        placement = payload.get("placement")
+        if placement not in ("inherit", "chat", "project"):
+            raise ValueError("Choose inherit, chat, or project placement")
+        project = None
+        if placement == "inherit":
+            result = self.list_canvas_documents()
+            if not result.get("ok"):
+                return result
+            previous = next((doc for doc in result["documents"] if doc.get("chat_id") == chat_id), None)
+            if previous is None:
+                raise ValueError("Ask the user whether to save in a project or as a chat draft before creating this item")
+            project = previous.get("project")
+        elif placement == "project":
+            project = payload.get("project")
+            if not isinstance(project, str) or not project.strip():
+                raise ValueError("A project folder is required")
+        return self.save_canvas_document({
+            "title": payload.get("title"),
+            "content": payload.get(content_key),
+            "chat_id": chat_id,
+            "project": project,
+            "kind": kind,
+        })
+
+    def canvas_project_files(self, chat_id, path=None, remove=False):
+        if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", chat_id):
+            raise ValueError("A valid chat ID is required")
+        if path is not None:
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError("A file path is required")
+            target = self._resolve_workspace_path(path, must_exist=not remove)
+            if not remove and not target.is_file():
+                raise ValueError("A file is required")
+            path = self._display_path(target)
+        with self.workbench_state_lock:
+            if self.canvas_project_files_path.exists():
+                associations = json.loads(self.canvas_project_files_path.read_text(encoding="utf-8"))
+                if not isinstance(associations, dict):
+                    raise ValueError("Invalid project file associations")
+            else:
+                associations = {}
+            files = associations.get(chat_id, [])
+            if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
+                raise ValueError("Invalid project file associations")
+            if path is not None:
+                files = [item for item in files if item != path]
+                if not remove:
+                    files.insert(0, path)
+                associations[chat_id] = files
+                temp_path = self.canvas_project_files_path.with_suffix(".tmp")
+                temp_path.write_text(json.dumps(associations, ensure_ascii=False), encoding="utf-8")
+                temp_path.replace(self.canvas_project_files_path)
+            return {"ok": True, "files": files}
 
     def save_workbench_state(self, payload):
         with self.workbench_state_lock:
@@ -2637,16 +2937,15 @@ class DashboardState:
                 raise error
 
         self.workspace_backup_dir.mkdir(parents=True, exist_ok=True)
-        now_token = time.strftime("%Y%m%d_%H%M%S")
-        backup_name = re.sub(r"[^a-zA-Z0-9._-]", "_", rel_for_log) + f".{now_token}.bak"
+        path_hash = hashlib.sha256(rel_for_log.encode("utf-8")).hexdigest()
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", rel_for_log)[:100]
+        backup_name = f"{safe_name}.{path_hash}.{time.time_ns()}.{uuid.uuid4().hex}.bak"
         backup_path = self.workspace_backup_dir / backup_name
-        try:
-            shutil.copy2(target, backup_path)
-        except OSError:
-            pass
+        shutil.copy2(target, backup_path)
 
         with tempfile.NamedTemporaryFile("wb", delete=False, dir=str(target.parent)) as tmp:
             tmp.write(encoded)
+            os.fchmod(tmp.fileno(), stat.st_mode & 0o7777)
             tmp_path = Path(tmp.name)
 
         try:
@@ -2665,6 +2964,33 @@ class DashboardState:
             "modified_ts": stat.st_mtime,
             "size_bytes": stat.st_size,
         }
+
+    def workspace_file_history(self, path):
+        target = self._resolve_workspace_path(path, must_exist=True)
+        if not target.is_file() or not self._is_workspace_text_file(target):
+            raise ValueError("A text or code file is required")
+        display_path = self._display_path(target)
+        path_hash = hashlib.sha256(display_path.encode("utf-8")).hexdigest()
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", display_path)[:100]
+        prefix = f"{safe_name}.{path_hash}."
+        versions = []
+        if self.workspace_backup_dir.exists():
+            for entry in self.workspace_backup_dir.glob(f"{prefix}*.bak"):
+                match = re.fullmatch(rf"{re.escape(prefix)}(\d+)\.([a-f0-9]{{32}})\.bak", entry.name)
+                if match and entry.is_file():
+                    versions.append({"id": entry.name, "created_at": int(match.group(1)) // 1_000_000})
+        versions.sort(key=lambda version: version["created_at"], reverse=True)
+        return {"path": display_path, "versions": versions}
+
+    def restore_workspace_file(self, path, version_id, expected_modified_ts, expected_size_bytes):
+        history = self.workspace_file_history(path)
+        if not isinstance(version_id, str) or not any(version["id"] == version_id for version in history["versions"]):
+            raise ValueError("File version not found")
+        backup = self.workspace_backup_dir / version_id
+        if backup.stat().st_size > WORKSPACE_MAX_FILE_BYTES:
+            raise ValueError("File version exceeds the maximum write size")
+        content = backup.read_text(encoding="utf-8")
+        return self.write_workspace_file(path, content, expected_modified_ts, expected_size_bytes)
 
     def save_upload(self, filename, content_base64, directory=None):
         import base64
@@ -4024,6 +4350,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/workbench/state":
             self._send_json(self.state.load_workbench_state())
             return
+        if self.path == "/api/workbench/documents":
+            result = self.state.list_canvas_documents()
+            self._send_json(result, status=200 if result.get("ok") else 500)
+            return
+        if self.path.split("?", 1)[0] == "/api/workbench/project-files":
+            try:
+                result = self.state.canvas_project_files(self._query_params().get("chat_id"))
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            except OSError as exc:
+                self._send_json({"ok": False, "message": f"Project file links unavailable: {exc}"}, status=500)
+                return
+            self._send_json(result)
+            return
         if self.path.split("?", 1)[0] == "/api/workbench/artifact":
             name = self._query_params().get("name", "")
             self._send_json(self.state.load_workbench_artifact(name))
@@ -4208,6 +4549,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             except ValueError as exc:
                 self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            self._send_json({"ok": True, **payload})
+            return
+        if self.path.split("?", 1)[0] == "/api/workspace/history":
+            try:
+                payload = self.state.workspace_file_history(self._query_params().get("path", ""))
+            except FileNotFoundError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=404)
+                return
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            except OSError as exc:
+                self._send_json({"ok": False, "message": f"File history unavailable: {exc}"}, status=500)
                 return
             self._send_json({"ok": True, **payload})
             return
@@ -4522,6 +4877,66 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             result = self.state.save_workbench_state(body)
             self._send_json(result, status=200 if result.get("ok") else 500)
+            return
+        if self.path == "/api/workbench/documents":
+            try:
+                body = self._read_json_body()
+                result = self.state.save_canvas_document(body)
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "message": "Invalid JSON body"}, status=400)
+                return
+            except (ValueError, FileNotFoundError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            self._send_json(result, status=200 if result.get("ok") else 409 if result.get("status") == "conflict" else 500)
+            return
+        if self.path in ("/api/workbench/documents/create-html", "/api/workbench/documents/create-diagram", "/api/workbench/documents/create-office"):
+            try:
+                body = self._read_json_body()
+                result = (self.state.create_canvas_html(body) if self.path.endswith("create-html")
+                          else self.state.create_canvas_diagram(body) if self.path.endswith("create-diagram")
+                          else self.state.create_canvas_office(body))
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "message": "Invalid JSON body"}, status=400)
+                return
+            except (ValueError, FileNotFoundError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            self._send_json(result, status=200 if result.get("ok") else 500)
+            return
+        if self.path == "/api/workbench/documents/edit":
+            try:
+                body = self._read_json_body()
+                result = self.state.edit_canvas_document(body)
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "message": "Invalid JSON body"}, status=400)
+                return
+            except (ValueError, FileNotFoundError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            self._send_json(result, status=200 if result.get("ok") else 409 if result.get("status") == "conflict" else 500)
+            return
+        if self.path == "/api/workbench/project-files":
+            try:
+                body = self._read_json_body()
+                if body.get("action") not in ("link", "unlink"):
+                    raise ValueError("A link or unlink action is required")
+                if not isinstance(body.get("path"), str) or not body["path"].strip():
+                    raise ValueError("A file path is required")
+                result = self.state.canvas_project_files(body.get("chat_id"), body.get("path"), body["action"] == "unlink")
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "message": "Invalid JSON body"}, status=400)
+                return
+            except FileNotFoundError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=404)
+                return
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            except OSError as exc:
+                self._send_json({"ok": False, "message": f"Project file link failed: {exc}"}, status=500)
+                return
+            self._send_json(result)
             return
         if self.path == "/api/workbench/chat-session/delete":
             try:
@@ -4842,6 +5257,34 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             except ValueError as exc:
                 self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            except OSError as exc:
+                self._send_json({"ok": False, "message": f"Workspace write failed: {exc}"}, status=500)
+                return
+            self._send_json({"ok": True, **payload})
+            return
+
+        if self.path == "/api/workspace/restore":
+            try:
+                body = self._read_json_body()
+                payload = self.state.restore_workspace_file(
+                    body.get("path"), body.get("version_id"),
+                    body.get("expected_modified_ts"), body.get("expected_size_bytes"),
+                )
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "message": "Invalid JSON body"}, status=400)
+                return
+            except FileNotFoundError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=404)
+                return
+            except RuntimeError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=409)
+                return
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, status=400)
+                return
+            except (OSError, UnicodeError) as exc:
+                self._send_json({"ok": False, "message": f"File restore failed: {exc}"}, status=500)
                 return
             self._send_json({"ok": True, **payload})
             return

@@ -44,6 +44,9 @@ This document is the active contract reference for the AI Workbench companion AP
 | `/api/terminal/close` | POST | Terminal process cleanup | Session lifecycle parity |
 | `/api/wiki/list` | GET | Wiki tree listing | Wiki workbench and future knowledge context |
 | `/api/workbench/state` | GET/POST | Shared HTML artifact and chat-session state on the Hermes host | AI Workbench Artifacts and Agent sessions |
+| `/api/workbench/documents` | GET/POST | List and save managed Canvas items with revision checks and history | Canvas library and editors |
+| `/api/workbench/documents/create-office` | POST | Create a version-1 spreadsheet or slide-deck Canvas item | Canvas editor and `create_canvas_office` agent tool |
+| `/api/workbench/documents/edit` | POST | Revision-checked AI edit of a managed Canvas item | Canvas agent tools |
 | `/api/wiki/read` | GET | Wiki document read | Wiki editor and Hermes context tools |
 | `/api/wiki/write` | POST | Wiki document write with backup/event | Wiki editor and controlled agent writes |
 | `/api/wiki/upload` | POST | Binary-safe file upload into the wiki (any type) | Wiki workbench upload button |
@@ -78,6 +81,12 @@ This document is the active contract reference for the AI Workbench companion AP
 | `/api/server/restart` | POST | Guarded process restart request | Admin panel only |
 
 ## Stable Payload Notes
+
+### Canvas Spreadsheets And Slide Decks
+
+`POST /api/workbench/documents/create-office` accepts `{chat_id, title, kind, content, placement, project?}`. `kind` is `spreadsheet` or `slides`; `content` is a JSON-encoded version-1 model; `placement` is `inherit`, `chat`, or `project`, with `project` required for project placement. The generic `/api/workbench/documents` save route stores these same item kinds and retains revision history. Office item content is limited to 2 MB; spreadsheets support up to 50 sheets and 20,000 populated cells, and slide decks up to 100 slides with 100 text elements per slide.
+
+The browser imports `.xlsx` and `.pptx` files up to 10 MB compressed and 20 MB expanded. XLSX conversion preserves basic cell values and formulas, but not formatting, charts, macros, or advanced workbook features. Canvas does not recalculate formulas; XLSX exports request recalculation when opened in Excel. PPTX conversion imports editable text with approximate positions; images, charts, themes/layout fidelity, transitions, and animations are not preserved. Exports are generated as `.xlsx` and `.pptx` files.
 
 ### Free Model Catalogue
 

@@ -53,6 +53,9 @@ export function filterDuplicateAgentSessions<T extends { id: string; source: str
 export const CHAT_SESSIONS_STORAGE_KEY = "homelabSpatialWorkbench.agentChatSessions.v1";
 export const CHAT_SESSIONS_CHANGED_EVENT = "homelabSpatialWorkbench.chatSessionsChanged";
 export const LOAD_CHAT_SESSION_EVENT = "homelabSpatialWorkbench.loadChatSession";
+export const CANVAS_DOCUMENT_CREATED_EVENT = "homelabSpatialWorkbench.documentCreated";
+export const CANVAS_PROJECT_FILE_LINKED_EVENT = "homelabSpatialWorkbench.projectFileLinked";
+export const CANVAS_ITEM_CREATED_EVENT = "homelabSpatialWorkbench.canvasItemCreated";
 const MAX_SAVED_SESSIONS = 50;
 const MAX_SAVED_MESSAGES = 100;
 const MAX_SESSION_STORAGE_CHARS = 1_000_000;

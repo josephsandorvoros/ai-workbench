@@ -5,6 +5,7 @@ import { WEB_TOOLS } from "./webTools";
 import { WIKI_TOOLS } from "./wikiTools";
 import { APP_PREVIEW_TOOLS } from "./appPreviewTools";
 import { GIT_TOOLS } from "./gitTools";
+import { DOCUMENT_TOOLS } from "./documentTools";
 
 export const BOARD_TOOLS: HermesToolSchema[] = [
   {
@@ -114,6 +115,7 @@ export const BOARD_TOOLS: HermesToolSchema[] = [
 ];
 
 export const LOCAL_VISUAL_TOOLS: HermesToolSchema[] = [
+  ...DOCUMENT_TOOLS,
   ...GIT_TOOLS,
   ...BOARD_TOOLS,
   ...HTML_TOOLS,

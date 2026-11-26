@@ -126,6 +126,170 @@ def contract_server(extra_env=None, legacy_backups=False):
 
 
 class ApiContractTests(unittest.TestCase):
+    def test_canvas_diagrams_inherit_location_validate_scenes_and_retain_history(self):
+        with contract_server() as server:
+            (server.workspace_root / "demo").mkdir()
+            payload = {"chat_id": "chat-1", "title": "Diagram", "kind": "mermaid",
+                       "content": "flowchart LR\n A-->B", "placement": "inherit"}
+            with self.assertRaises(HTTPError) as missing:
+                server.post_json("/api/workbench/documents/create-diagram", payload)
+            self.assertEqual(missing.exception.code, 400)
+            server.post_json("/api/workbench/documents", {
+                "title": "Notes", "content": "", "chat_id": "chat-1", "project": "demo",
+            })
+            _, result = server.post_json("/api/workbench/documents/create-diagram", payload)
+            diagram = result["document"]
+            self.assertEqual((diagram["kind"], diagram["project"]), ("mermaid", "demo"))
+            _, edited = server.post_json("/api/workbench/documents/edit", {
+                "id": diagram["id"], "revision": diagram["revision"], "content": "flowchart LR\n A-->C",
+            })
+            self.assertEqual(edited["document"]["versions"][0]["content"], payload["content"])
+            with self.assertRaises(HTTPError) as conflict:
+                server.post_json("/api/workbench/documents/edit", {
+                    "id": diagram["id"], "revision": diagram["revision"], "content": "stale",
+                })
+            self.assertEqual(conflict.exception.code, 409)
+            for content in ("not json", "[]", '{"elements": {}}', '{"elements": [], "files": []}',
+                            '{"elements": [{}]}', '{"elements": [], "appState": null}', '{"elements": [], "files": {"a": NaN}}',
+                            json.dumps({"elements": [{"id": "a", "type": "rectangle", "x": 10**400, "y": 0, "width": 1, "height": 1}]})):
+                with self.subTest(content=content), self.assertRaises(HTTPError) as invalid:
+                    server.post_json("/api/workbench/documents/create-diagram", {
+                        **payload, "kind": "excalidraw", "content": content,
+                    })
+                self.assertEqual(invalid.exception.code, 400)
+            _, visual = server.post_json("/api/workbench/documents/create-diagram", {
+                **payload, "kind": "excalidraw", "content": '{"elements": [], "files": {}}',
+            })
+            self.assertEqual(visual["document"]["project"], "demo")
+            with self.assertRaises(HTTPError) as changed_kind:
+                server.post_json("/api/workbench/documents", {**visual["document"], "kind": "mermaid"})
+            self.assertEqual(changed_kind.exception.code, 400)
+
+    def test_canvas_documents_persist_and_reject_stale_edits(self):
+        with contract_server() as server:
+            (server.workspace_root / "demo").mkdir()
+            _, created = server.post_json("/api/workbench/documents", {
+                "title": "Notes", "content": "# First", "chat_id": "chat-1", "project": "demo",
+            })
+            document = created["document"]
+            _, saved = server.post_json("/api/workbench/documents", {
+                **document, "content": "# Revised",
+            })
+            self.assertEqual(saved["document"]["revision"], 2)
+            with self.assertRaises(HTTPError) as conflict:
+                server.post_json("/api/workbench/documents", {**document, "content": "stale"})
+            self.assertEqual(conflict.exception.code, 409)
+            _, listing = server.get_json("/api/workbench/documents")
+            self.assertEqual(listing["documents"][0]["content"], "# Revised")
+            self.assertEqual(listing["documents"][0]["project"], "demo")
+            self.assertEqual(listing["documents"][0]["chat_id"], "chat-1")
+
+    def test_canvas_documents_reject_invalid_projects(self):
+        with contract_server() as server:
+            for project in ("../outside", "missing"):
+                with self.subTest(project=project), self.assertRaises(HTTPError) as error:
+                    server.post_json("/api/workbench/documents", {
+                        "title": "Notes", "content": "", "chat_id": "chat-1", "project": project,
+                    })
+                self.assertEqual(error.exception.code, 400)
+            _, result = server.post_json("/api/workbench/documents", {
+                "title": "Draft", "content": "text", "chat_id": "chat-1", "project": None,
+            })
+            self.assertIsNone(result["document"]["project"])
+
+    def test_canvas_ai_edit_retains_version_and_rejects_stale_revision(self):
+        with contract_server() as server:
+            _, created = server.post_json("/api/workbench/documents", {
+                "title": "Notes", "content": "original", "chat_id": "chat-1", "project": None,
+            })
+            document = created["document"]
+            _, updated = server.post_json("/api/workbench/documents/edit", {
+                "id": document["id"], "revision": document["revision"], "content": "edited",
+            })
+            self.assertEqual(updated["document"]["content"], "edited")
+            self.assertEqual(updated["document"]["versions"][0]["content"], "original")
+            with self.assertRaises(HTTPError) as error:
+                server.post_json("/api/workbench/documents/edit", {
+                    "id": document["id"], "revision": document["revision"], "content": "stale",
+                })
+            self.assertEqual(error.exception.code, 409)
+            version = updated["document"]["versions"][0]
+            _, restored = server.post_json("/api/workbench/documents", {
+                **updated["document"], "title": version["title"], "content": version["content"], "source": "restore",
+            })
+            self.assertEqual(restored["document"]["content"], "original")
+            self.assertEqual(restored["document"]["versions"][0]["content"], "edited")
+
+    def test_canvas_html_inherits_location_and_preserves_type_and_history(self):
+        with contract_server() as server:
+            (server.workspace_root / "demo").mkdir()
+            payload = {"chat_id": "chat-1", "title": "Chart", "html": "<button>Click</button>", "placement": "inherit"}
+            with self.assertRaises(HTTPError) as error:
+                server.post_json("/api/workbench/documents/create-html", payload)
+            self.assertEqual(error.exception.code, 400)
+            server.post_json("/api/workbench/documents", {
+                "title": "Notes", "content": "text", "chat_id": "chat-1", "project": "demo",
+            })
+            _, created = server.post_json("/api/workbench/documents/create-html", payload)
+            item = created["document"]
+            self.assertEqual((item["kind"], item["project"]), ("html", "demo"))
+            _, updated = server.post_json("/api/workbench/documents/edit", {
+                "id": item["id"], "revision": item["revision"], "content": "<p>Updated</p>",
+            })
+            self.assertEqual(updated["document"]["kind"], "html")
+            self.assertEqual(updated["document"]["versions"][0]["content"], "<button>Click</button>")
+
+    def test_canvas_office_items_validate_models_inherit_location_and_retain_history(self):
+        with contract_server() as server:
+            (server.workspace_root / "demo").mkdir()
+            server.post_json("/api/workbench/documents", {
+                "title": "Notes", "content": "text", "chat_id": "chat-1", "project": "demo",
+            })
+            spreadsheet = {
+                "version": 1,
+                "sheets": [{"name": "Sheet1", "cells": {"A1": {"value": "Total"}, "B1": {"formula": "=SUM(A1:A1)", "result": 2}}}],
+            }
+            slides = {
+                "version": 1, "width": 13.333, "height": 7.5,
+                "slides": [{"background": "FFFFFF", "elements": [{
+                    "id": "title", "text": "Title", "x": 1, "y": 1, "w": 5, "h": 1,
+                    "fontSize": 28, "color": "18242B", "bold": True, "align": "left",
+                }]}],
+            }
+            for kind, content in (("spreadsheet", spreadsheet), ("slides", slides)):
+                _, result = server.post_json("/api/workbench/documents/create-office", {
+                    "chat_id": "chat-1", "title": f"Test {kind}", "kind": kind,
+                    "content": json.dumps(content), "placement": "inherit",
+                })
+                item = result["document"]
+                self.assertEqual((item["kind"], item["project"]), (kind, "demo"))
+                _, updated = server.post_json("/api/workbench/documents/edit", {
+                    "id": item["id"], "revision": item["revision"],
+                    "content": json.dumps({**content, "version": 1}),
+                })
+                self.assertEqual(updated["document"]["versions"][0]["content"], json.dumps(content))
+                with self.assertRaises(HTTPError) as changed_kind:
+                    server.post_json("/api/workbench/documents", {
+                        **updated["document"], "kind": "markdown",
+                    })
+                self.assertEqual(changed_kind.exception.code, 400)
+
+            invalid_office_items = [
+                {"kind": "spreadsheet", "content": "not json"},
+                {"kind": "spreadsheet", "content": json.dumps({"version": 1, "sheets": [{"name": "Sheet1", "cells": {"A1": {"formula": "SUM(A1:A2)"}}}]})},
+                {"kind": "spreadsheet", "content": json.dumps({"version": 1, "sheets": [{"name": "Data", "cells": {}}, {"name": "data", "cells": {}}]})},
+                {"kind": "slides", "content": json.dumps({"version": 1, "width": 13.333, "height": 7.5, "slides": [{"background": "FFFFFF", "elements": [{"id": "x", "text": "Bad", "x": 12, "y": 1, "w": 5, "h": 1, "fontSize": 20, "color": "FFFFFF", "bold": False, "align": "left"}]}]})},
+            ]
+            for invalid in invalid_office_items:
+                with self.subTest(invalid=invalid), self.assertRaises(HTTPError) as error:
+                    server.post_json("/api/workbench/documents/create-office", {
+                        "chat_id": "chat-1", "title": "Invalid", "placement": "chat", **invalid,
+                    })
+                self.assertEqual(error.exception.code, 400)
+            with self.assertRaises(HTTPError) as error:
+                server.post_json("/api/workbench/documents", {**updated["document"], "kind": "markdown"})
+            self.assertEqual(error.exception.code, 400)
+
     def test_herdr_worker_input_uses_existing_auth_and_keeps_keys_explicit(self):
         with contract_server({"TERMINAL_API_TOKEN": "unit-test-token", "WORKBENCH_AUTH": "token"}) as server:
             with self.assertRaises(HTTPError) as unauthorized:
@@ -1314,6 +1478,68 @@ class ApiContractTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as raised:
                 server.get_json("/api/workspace/read", {"path": "image.png"})
             self.assertEqual(raised.exception.code, 400)
+
+    def test_canvas_project_file_links_are_scoped_and_do_not_copy_files(self):
+        with contract_server() as server:
+            path = server.workspace_root / "note.md"
+            path.write_text("original", encoding="utf-8")
+            for _ in range(2):
+                _, linked = server.post_json("/api/workbench/project-files", {
+                    "chat_id": "chat-a", "path": "note.md", "action": "link",
+                })
+            self.assertEqual(linked["files"], ["note.md"])
+            _, other = server.get_json("/api/workbench/project-files", {"chat_id": "chat-b"})
+            self.assertEqual(other["files"], [])
+            with self.assertRaises(HTTPError):
+                server.post_json("/api/workbench/project-files", {
+                    "chat_id": "chat-a", "path": "../outside.md", "action": "link",
+                })
+            _, unlinked = server.post_json("/api/workbench/project-files", {
+                "chat_id": "chat-a", "path": "note.md", "action": "unlink",
+            })
+            self.assertEqual(unlinked["files"], [])
+            self.assertEqual(path.read_text(encoding="utf-8"), "original")
+
+    def test_workspace_history_restores_versions_and_rejects_stale_changes(self):
+        with contract_server() as server:
+            path = server.workspace_root / "note.md"
+            path.write_text("original", encoding="utf-8")
+            _, opened = server.get_json("/api/workspace/read", {"path": "note.md"})
+            _, updated = server.post_json("/api/workspace/write", {
+                "path": "note.md", "content": "AI edit",
+                "expected_modified_ts": opened["modified_ts"], "expected_size_bytes": opened["size_bytes"],
+            })
+            _, history = server.get_json("/api/workspace/history", {"path": "note.md"})
+            self.assertEqual(len(history["versions"]), 1)
+            version = history["versions"][0]["id"]
+            with self.assertRaises(HTTPError) as raised:
+                server.post_json("/api/workspace/restore", {
+                    "path": "note.md", "version_id": version,
+                    "expected_modified_ts": opened["modified_ts"], "expected_size_bytes": opened["size_bytes"],
+                })
+            self.assertEqual(raised.exception.code, 409)
+            self.assertEqual(path.read_text(encoding="utf-8"), "AI edit")
+            server.post_json("/api/workspace/restore", {
+                "path": "note.md", "version_id": version,
+                "expected_modified_ts": updated["modified_ts"], "expected_size_bytes": updated["size_bytes"],
+            })
+            self.assertEqual(path.read_text(encoding="utf-8"), "original")
+            _, history = server.get_json("/api/workspace/history", {"path": "note.md"})
+            self.assertEqual(len(history["versions"]), 2)
+
+    def test_workspace_write_fails_if_backup_fails(self):
+        with contract_server() as server:
+            path = server.workspace_root / "note.md"
+            path.write_text("original", encoding="utf-8")
+            _, opened = server.get_json("/api/workspace/read", {"path": "note.md"})
+            with patch.object(dashboard_server.shutil, "copy2", side_effect=OSError("backup failed")):
+                with self.assertRaises(HTTPError) as raised:
+                    server.post_json("/api/workspace/write", {
+                        "path": "note.md", "content": "changed",
+                        "expected_modified_ts": opened["modified_ts"], "expected_size_bytes": opened["size_bytes"],
+                    })
+            self.assertEqual(raised.exception.code, 500)
+            self.assertEqual(path.read_text(encoding="utf-8"), "original")
 
     def test_workspace_import_preserves_binary_data_names_and_existing_files(self):
         with contract_server() as server:
