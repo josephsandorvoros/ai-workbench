@@ -11,6 +11,7 @@ import { AgentChat } from "./components/AgentChat";
 import { DocumentCanvas } from "./components/DocumentCanvas";
 import type { ActiveCanvasContext } from "./agent/activeCanvasContext";
 import { CANVAS_ITEM_CREATED_EVENT } from "./agent/chatSessions";
+import { CanvasCreationTracker } from "./agent/canvasCreationTracker";
 import { useMobileChat } from "./lib/useMobileChat";
 import { GuardrailsWorkbench } from "./components/GuardrailsWorkbench";
 import { JobsBoard } from "./components/JobsBoard";
@@ -280,6 +281,7 @@ export function App() {
   const [createdCanvasItem, setCreatedCanvasItem] = useState<CanvasDocument | null>(null);
   const [openCreatedRequest, setOpenCreatedRequest] = useState(0);
   const [canvasItemNotice, setCanvasItemNotice] = useState(false);
+  const [canvasSyncError, setCanvasSyncError] = useState("");
   const [sourceControlPath, setSourceControlPath] = useState("");
   const [updates, setUpdates] = useState<UpdatesStatus | null>(null);
   const refreshUpdates = useCallback((force = false) => {
@@ -536,6 +538,44 @@ export function App() {
     return () => window.removeEventListener(CANVAS_ITEM_CREATED_EVENT, onCreated);
   }, [activeChatId, showCanvas, activeWorkspaceTab, projectContext.dirty, wikiContext.dirty, documentContext.dirty, mobileChat]);
 
+  useEffect(() => {
+    if (!activeChatId) return;
+    const chatId = activeChatId;
+    let active = true;
+    let inFlight = false;
+    const tracker = new CanvasCreationTracker();
+    const rememberCreated = (event: Event) => {
+      const detail = (event as CustomEvent<{ chatId: string; document: CanvasDocument }>).detail;
+      if (detail?.chatId === chatId && detail.document) tracker.remember(detail.document.id);
+    };
+    async function syncCreatedItems() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const result = await compatClient.listCanvasDocuments();
+        if (!result.ok) throw new Error("The document library is unavailable.");
+        if (!active) return;
+        const created = tracker.update(result.documents, chatId);
+        setCanvasSyncError("");
+        if (created) {
+          window.dispatchEvent(new CustomEvent(CANVAS_ITEM_CREATED_EVENT, { detail: { chatId, document: created } }));
+        }
+      } catch (reason) {
+        if (active) setCanvasSyncError(`Could not check for new Canvas items: ${reason instanceof Error ? reason.message : String(reason)}`);
+      } finally {
+        inFlight = false;
+      }
+    }
+    window.addEventListener(CANVAS_ITEM_CREATED_EVENT, rememberCreated);
+    void syncCreatedItems();
+    const timer = window.setInterval(() => void syncCreatedItems(), 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener(CANVAS_ITEM_CREATED_EVENT, rememberCreated);
+    };
+  }, [activeChatId]);
+
   function closeCanvas() {
     setCanvasOpen(false);
     canvasTriggerRef.current?.focus();
@@ -672,8 +712,7 @@ export function App() {
         </nav>}
 
         <section className="conversation-stage" aria-label="Conversation">
-          <AgentChat onActiveSessionChange={setActiveChatId} canvasNotice={canvasItemNotice && createdCanvasItem?.chat_id === activeChatId ? createdCanvasItem.title : undefined} onOpenCanvasItem={() => {
-            setCanvasItemNotice(false);
+          <AgentChat onActiveSessionChange={setActiveChatId} canvasSyncError={canvasSyncError} canvasNotice={canvasItemNotice && createdCanvasItem?.chat_id === activeChatId ? createdCanvasItem.title : undefined} onOpenCanvasItem={() => {
             setOpenCreatedRequest((current) => current + 1);
             selectWorkspaceTab("documents");
           }} canvasContext={!showCanvas ? null
@@ -754,6 +793,7 @@ export function App() {
                 onContextChange={setDocumentContext}
                 createdItem={createdCanvasItem}
                 openCreatedRequest={openCreatedRequest}
+                onCreatedItemOpened={() => setCanvasItemNotice(false)}
                 projectMode={activeWorkspaceTab === "project"}
                 activeProjectPath={projectContext.detail}
                 onOpenProjects={() => {

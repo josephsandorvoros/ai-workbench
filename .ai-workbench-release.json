@@ -1,6 +1,6 @@
 {
   "kind": "ai-workbench-public-snapshot",
-  "releaseTag": "v0.2.2",
+  "releaseTag": "v0.2.3",
   "schema": 1,
-  "sourceCommit": "a68580a4b156a6a3aeb07ef54569f502b7246daa"
+  "sourceCommit": "e5b3f9d5c841e5fa044e91a805f9b3a4828f0a72"
 }

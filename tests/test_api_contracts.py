@@ -172,6 +172,7 @@ class ApiContractTests(unittest.TestCase):
                 "title": "Notes", "content": "# First", "chat_id": "chat-1", "project": "demo",
             })
             document = created["document"]
+            self.assertNotIn("created_by_ai", document)
             _, saved = server.post_json("/api/workbench/documents", {
                 **document, "content": "# Revised",
             })
@@ -233,10 +234,12 @@ class ApiContractTests(unittest.TestCase):
             _, created = server.post_json("/api/workbench/documents/create-html", payload)
             item = created["document"]
             self.assertEqual((item["kind"], item["project"]), ("html", "demo"))
+            self.assertTrue(item["created_by_ai"])
             _, updated = server.post_json("/api/workbench/documents/edit", {
                 "id": item["id"], "revision": item["revision"], "content": "<p>Updated</p>",
             })
             self.assertEqual(updated["document"]["kind"], "html")
+            self.assertTrue(updated["document"]["created_by_ai"])
             self.assertEqual(updated["document"]["versions"][0]["content"], "<button>Click</button>")
 
     def test_canvas_office_items_validate_models_inherit_location_and_retain_history(self):

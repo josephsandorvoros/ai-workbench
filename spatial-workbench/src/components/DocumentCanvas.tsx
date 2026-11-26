@@ -30,7 +30,7 @@ function defaultContent(kind: CanvasItemKind): string {
   return "";
 }
 
-export function DocumentCanvas({ chatId, headerSlot, active, onContextChange, projectMode, activeProjectPath, projectContent, onOpenProjects, onOpenProjectFile, onOpenDocuments, createdItem, openCreatedRequest }: {
+export function DocumentCanvas({ chatId, headerSlot, active, onContextChange, projectMode, activeProjectPath, projectContent, onOpenProjects, onOpenProjectFile, onOpenDocuments, createdItem, openCreatedRequest, onCreatedItemOpened }: {
   chatId: string | null;
   headerSlot: HTMLElement | null;
   active: boolean;
@@ -43,11 +43,13 @@ export function DocumentCanvas({ chatId, headerSlot, active, onContextChange, pr
   onOpenDocuments: () => void;
   createdItem: CanvasDocument | null;
   openCreatedRequest: number;
+  onCreatedItemOpened: () => void;
 }) {
   const [documents, setDocuments] = useState<CanvasDocument[]>([]);
   const [selected, setSelected] = useState<CanvasDocument | null>(null);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
+  const [editorPending, setEditorPending] = useState(false);
   const [creating, setCreating] = useState(false);
   const [creatingKind, setCreatingKind] = useState<CanvasItemKind>("markdown");
   const [chooseKind, setChooseKind] = useState(false);
@@ -74,7 +76,7 @@ export function DocumentCanvas({ chatId, headerSlot, active, onContextChange, pr
   const newButton = useRef<HTMLButtonElement>(null);
   const relatedButton = useRef<HTMLButtonElement>(null);
   const projectFilesSequence = useRef(0);
-  const dirty = Boolean(selected && (title !== selected.title || content !== selected.content));
+  const dirty = Boolean(selected && (editorPending || title !== selected.title || content !== selected.content));
   const latest = useRef({ selected, dirty, busy });
   latest.current = { selected, dirty, busy };
 
@@ -146,7 +148,7 @@ export function DocumentCanvas({ chatId, headerSlot, active, onContextChange, pr
 
   useEffect(() => {
     if (!openCreatedRequest || !createdItem || createdItem.chat_id !== chatId) return;
-    selectDocument(createdItem);
+    if (selectDocument(createdItem)) onCreatedItemOpened();
   }, [openCreatedRequest]);
 
   useEffect(() => {
@@ -237,18 +239,20 @@ export function DocumentCanvas({ chatId, headerSlot, active, onContextChange, pr
   function selectDocument(document: CanvasDocument) {
     if (projectMode && selected?.id === document.id && selected.revision === document.revision) {
       onOpenDocuments();
-      return;
+      return true;
     }
-    if (dirty && !window.confirm("Discard your unsaved document changes?")) return;
+    if (dirty && !window.confirm("Discard your unsaved document changes?")) return false;
     onOpenDocuments();
     setSelected(document);
     setTitle(document.title);
     setContent(document.content);
+    setEditorPending(false);
     setCreating(false);
     setError("");
     setExternalChange(false);
     setShowHistory(false);
     if (document.kind === "html" || document.kind === "mermaid") { setPreview(true); setHtmlPreviewOnly(true); }
+    return true;
   }
 
   async function createDocument(selectedProject: string | null, kind = creatingKind) {
@@ -265,6 +269,7 @@ export function DocumentCanvas({ chatId, headerSlot, active, onContextChange, pr
       setSelected(result.document);
       setTitle(result.document.title);
       setContent(result.document.content);
+      setEditorPending(false);
       setCreating(false);
       if (kind === "html" || kind === "mermaid") { setPreview(true); setHtmlPreviewOnly(true); }
       setView("chat");
@@ -465,7 +470,7 @@ export function DocumentCanvas({ chatId, headerSlot, active, onContextChange, pr
               </Suspense>
             </ErrorBoundary> : selected.kind === "spreadsheet" ? <ErrorBoundary key={`${selected.id}-${selected.revision}`} label="Spreadsheet editor">
               <Suspense fallback={<p className="document-meta">Loading spreadsheet editor...</p>}>
-                <SpreadsheetCanvas content={content} onChange={setContent} disabled={busy} />
+                <SpreadsheetCanvas content={content} onChange={setContent} onPendingChange={setEditorPending} disabled={busy} />
               </Suspense>
             </ErrorBoundary> : selected.kind === "slides" ? <ErrorBoundary key={`${selected.id}-${selected.revision}`} label="Slide editor">
               <Suspense fallback={<p className="document-meta">Loading slide editor...</p>}>

@@ -692,7 +692,7 @@ class DashboardState:
                 if element.get("fill") is not None and not valid_color(element["fill"]):
                     raise ValueError("Slide text fill must be a six-digit color")
 
-    def save_canvas_document(self, payload):
+    def save_canvas_document(self, payload, *, created_by_ai=False):
         if not isinstance(payload, dict):
             raise ValueError("Document data is required")
         document_id = payload.get("id")
@@ -777,6 +777,8 @@ class DashboardState:
                     "updated_at": int(time.time() * 1000),
                     "versions": versions,
                 }
+                if (existing and existing.get("created_by_ai")) or (not existing and created_by_ai):
+                    document["created_by_ai"] = True
                 documents = [document, *(doc for doc in documents if doc.get("id") != document["id"])]
                 temp_path = self.canvas_documents_path.with_suffix(".tmp")
                 temp_path.write_text(json.dumps(documents, ensure_ascii=False), encoding="utf-8")
@@ -844,7 +846,7 @@ class DashboardState:
             "chat_id": chat_id,
             "project": project,
             "kind": kind,
-        })
+        }, created_by_ai=True)
 
     def canvas_project_files(self, chat_id, path=None, remove=False):
         if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", chat_id):

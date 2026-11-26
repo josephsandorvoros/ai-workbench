@@ -28,9 +28,10 @@ function modelCellCount(model: SpreadsheetModel): number {
   return model.sheets.reduce((total, sheet) => total + Object.keys(sheet.cells).length, 0);
 }
 
-export function SpreadsheetCanvas({ content, onChange, disabled }: {
+export function SpreadsheetCanvas({ content, onChange, onPendingChange, disabled }: {
   content: string;
   onChange: (content: string) => void;
+  onPendingChange: (pending: boolean) => void;
   disabled: boolean;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
@@ -88,6 +89,7 @@ export function SpreadsheetCanvas({ content, onChange, disabled }: {
       return next;
     });
     setFormulaDraft(selectedCellText(nextCell));
+    onPendingChange(false);
   }
 
   async function handleImport(file?: File) {
@@ -147,7 +149,7 @@ export function SpreadsheetCanvas({ content, onChange, disabled }: {
     </div>
     <div className="spreadsheet-formula-bar">
       <strong aria-label="Selected cell">{selectedAddress}</strong>
-      <input aria-label="Cell value or formula" value={formulaDraft} disabled={disabled} onChange={(event) => setFormulaDraft(event.target.value)} onBlur={() => commitCell(selectedAddress, formulaDraft)} onKeyDown={(event) => {
+      <input aria-label="Cell value or formula" value={formulaDraft} disabled={disabled} onChange={(event) => { setFormulaDraft(event.target.value); onPendingChange(true); }} onBlur={() => commitCell(selectedAddress, formulaDraft)} onKeyDown={(event) => {
         if (event.key === "Enter") {
           event.currentTarget.blur();
         }
@@ -164,7 +166,7 @@ export function SpreadsheetCanvas({ content, onChange, disabled }: {
               {Array.from({ length: COLUMNS_PER_PAGE }, (_, columnOffset) => {
                 const address = cellAddress(row, firstColumn + columnOffset);
                 return <td key={address} className={selectedAddress === address ? "selected" : undefined}>
-                  <input aria-label={`${address} cell`} value={cellDrafts[address] ?? cellText(sheet.cells[address])} disabled={disabled} onFocus={() => setSelectedAddress(address)} onChange={(event) => setCellDrafts((current) => ({ ...current, [address]: event.target.value }))} onBlur={() => {
+                  <input aria-label={`${address} cell`} value={cellDrafts[address] ?? cellText(sheet.cells[address])} disabled={disabled} onFocus={() => setSelectedAddress(address)} onChange={(event) => { setCellDrafts((current) => ({ ...current, [address]: event.target.value })); onPendingChange(true); }} onBlur={() => {
                     if (Object.hasOwn(cellDrafts, address)) commitCell(address, cellDrafts[address]);
                   }} onKeyDown={(event) => {
                     if (event.key === "Enter") event.currentTarget.blur();

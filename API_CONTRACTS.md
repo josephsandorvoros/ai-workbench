@@ -84,6 +84,8 @@ This document is the active contract reference for the AI Workbench companion AP
 
 ### Canvas Spreadsheets And Slide Decks
 
+Items created through the Canvas agent creation endpoints include `created_by_ai: true` in document responses; the server retains it across later saves. The browser uses it to detect new agent-created items for the active chat without reopening older items on page load. Ordinary editor-created documents do not receive this marker.
+
 `POST /api/workbench/documents/create-office` accepts `{chat_id, title, kind, content, placement, project?}`. `kind` is `spreadsheet` or `slides`; `content` is a JSON-encoded version-1 model; `placement` is `inherit`, `chat`, or `project`, with `project` required for project placement. The generic `/api/workbench/documents` save route stores these same item kinds and retains revision history. Office item content is limited to 2 MB; spreadsheets support up to 50 sheets and 20,000 populated cells, and slide decks up to 100 slides with 100 text elements per slide.
 
 The browser imports `.xlsx` and `.pptx` files up to 10 MB compressed and 20 MB expanded. XLSX conversion preserves basic cell values and formulas, but not formatting, charts, macros, or advanced workbook features. Canvas does not recalculate formulas; XLSX exports request recalculation when opened in Excel. PPTX conversion imports editable text with approximate positions; images, charts, themes/layout fidelity, transitions, and animations are not preserved. Exports are generated as `.xlsx` and `.pptx` files.

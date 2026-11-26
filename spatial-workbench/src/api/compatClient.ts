@@ -29,6 +29,7 @@ export interface CanvasDocument {
   updated_at: number;
   versions?: CanvasDocumentVersion[];
   kind?: CanvasItemKind;
+  created_by_ai?: boolean;
 }
 
 export interface CanvasDocumentVersion {

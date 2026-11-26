@@ -142,6 +142,7 @@ interface AgentChatProps {
   onActiveSessionChange?: (id: string) => void;
   canvasContext?: ActiveCanvasContext | null;
   canvasNotice?: string;
+  canvasSyncError?: string;
   onOpenCanvasItem?: () => void;
 }
 
@@ -327,7 +328,7 @@ function handleSlashCommand(
   }
 }
 
-export function AgentChat({ labelOverride, onActiveSessionChange, canvasContext = null, canvasNotice, onOpenCanvasItem }: AgentChatProps) {
+export function AgentChat({ labelOverride, onActiveSessionChange, canvasContext = null, canvasNotice, canvasSyncError, onOpenCanvasItem }: AgentChatProps) {
   const providerConfig = useAgentProvider();
   const isGatewayProvider = providerConfig.baseUrl.replace(/\/+$/, "") === "/hermes-gw";
   const [savedSessions, setSavedSessions] = useState<SavedChatSession[]>(loadSavedChatSessions);
@@ -2119,6 +2120,7 @@ export function AgentChat({ labelOverride, onActiveSessionChange, canvasContext 
         </div>
       )}
       <div className="agent-chat-input-row">
+        {canvasSyncError && <div className="document-error" role="alert">{canvasSyncError}</div>}
         {canvasNotice && <div className="document-meta" role="status">Created {canvasNotice}. <button type="button" className="document-refresh" onClick={onOpenCanvasItem} disabled={mobileChat}>{mobileChat ? "Open Canvas on desktop" : "Open in Canvas"}</button></div>}
         {canvasContext && <div className="document-meta" role="status">
           Canvas context: {canvasContext.space}{canvasContext.detail ? ` · ${canvasContext.detail}` : ""}{canvasContext.dirty ? " · unsaved" : ""}
